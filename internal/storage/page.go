@@ -1,115 +1,202 @@
 package storage
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"os"
 )
 
-const PageSize = 8192 // 8KB page size
-
-// PageHeader represents metadata for the page.
 type PageHeader struct {
-	PageType   uint16
-	NumTuples  uint16
-	FreeSpace  uint16
-	Checksum   uint32
-	LinkToNext uint64
+	PageNumber   int32
+	PageType     string
+	FreeSpacePtr int32
 }
 
-type Tuple struct {
+type Item struct {
 	Data []byte
 }
 
-// Page represents a database page with all necessary components.
 type Page struct {
 	Header       PageHeader
-	FreeSpaceMap []byte
-	ItemPointers []ItemPointer
-	Tuples       []Tuple
-	Footer       Footer
+	ItemIds      []int32
+	FreeSpace    []byte
+	Items        []Item
+	SpecialSpace []byte
 }
 
-// ItemPointer is a pointer to a tuple on the page.
-type ItemPointer struct {
-	Offset uint32
-	Length uint32
-}
-
-// Footer contains additional metadata.
-type Footer struct {
-	Checksum uint32
-}
-
-// WritePage writes the page to a file (simulating disk storage).
-func (p *Page) WritePage(filePath string) error {
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0644)
+// Function to serialize Page struct and write to file
+func (p *Page) WriteToFile(filename string) error {
+	file, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	buffer := new(bytes.Buffer)
-
-	// Serialize PageHeader
-	if err := binary.Write(buffer, binary.LittleEndian, p.Header); err != nil {
-		return fmt.Errorf("failed to write page header: %v", err)
+	err = binary.Write(file, binary.LittleEndian, p.Header.PageNumber)
+	if err != nil {
+		return err
 	}
 
-	// Serialize FreeSpaceMap
-	if _, err := buffer.Write(p.FreeSpaceMap); err != nil {
-		return fmt.Errorf("failed to write free space map: %v", err)
+	pageTypeLen := int32(len(p.Header.PageType))
+	err = binary.Write(file, binary.LittleEndian, pageTypeLen)
+	if err != nil {
+		return err
+	}
+	err = binary.Write(file, binary.LittleEndian, []byte(p.Header.PageType))
+	if err != nil {
+		return err
 	}
 
-	// Serialize ItemPointers
-	for _, itemPointer := range p.ItemPointers {
-		if err := binary.Write(buffer, binary.LittleEndian, itemPointer); err != nil {
-			return fmt.Errorf("failed to write item pointer: %v", err)
+	err = binary.Write(file, binary.LittleEndian, p.Header.FreeSpacePtr)
+	if err != nil {
+		return err
+	}
+
+	itemIdsLen := int32(len(p.ItemIds))
+	err = binary.Write(file, binary.LittleEndian, itemIdsLen)
+	if err != nil {
+		return err
+	}
+
+	for _, itemId := range p.ItemIds {
+		err = binary.Write(file, binary.LittleEndian, itemId)
+		if err != nil {
+			return err
 		}
 	}
 
-	// Serialize Tuples
-	for _, tuple := range p.Tuples {
-		if _, err := buffer.Write(tuple.Data); err != nil {
-			return fmt.Errorf("failed to write tuple data: %v", err)
+	itemsLen := int32(len(p.Items))
+	err = binary.Write(file, binary.LittleEndian, itemsLen)
+	if err != nil {
+		return err
+	}
+
+	for _, item := range p.Items {
+		itemLen := int32(len(item.Data))
+		err = binary.Write(file, binary.LittleEndian, itemLen)
+		if err != nil {
+			return err
+		}
+		err = binary.Write(file, binary.LittleEndian, item.Data)
+		if err != nil {
+			return err
 		}
 	}
 
-	// Serialize Footer
-	if err := binary.Write(buffer, binary.LittleEndian, p.Footer); err != nil {
-		return fmt.Errorf("failed to write footer: %v", err)
+	freeSpaceLen := int32(len(p.FreeSpace))
+	err = binary.Write(file, binary.LittleEndian, freeSpaceLen)
+	if err != nil {
+		return err
+	}
+	err = binary.Write(file, binary.LittleEndian, p.FreeSpace)
+	if err != nil {
+		return err
 	}
 
-	// Write to file
-	if _, err := file.WriteAt(buffer.Bytes(), 0); err != nil {
-		return fmt.Errorf("failed to write to file: %v", err)
+	specialSpaceLen := int32(len(p.SpecialSpace))
+	err = binary.Write(file, binary.LittleEndian, specialSpaceLen)
+	if err != nil {
+		return err
+	}
+	err = binary.Write(file, binary.LittleEndian, p.SpecialSpace)
+	if err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// ReadPage reads a page from a file (simulating disk storage).
-func (p *Page) ReadPage(filePath string) error {
-	file, err := os.Open(filePath)
+// Function to read a Page struct from file
+func ReadFromFile(filename string) (*Page, error) {
+	file, err := os.Open(filename)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer file.Close()
 
-	buffer := make([]byte, PageSize)
-	_, err = file.Read(buffer)
+	p := &Page{}
+
+	err = binary.Read(file, binary.LittleEndian, &p.Header.PageNumber)
 	if err != nil {
-		return fmt.Errorf("failed to read file: %v", err)
+		return nil, fmt.Errorf("unexpected EOF while reading PageNumber")
 	}
 
-	// Deserialize the PageHeader
-	if err := binary.Read(bytes.NewReader(buffer[:16]), binary.LittleEndian, &p.Header); err != nil {
-		return fmt.Errorf("failed to read page header: %v", err)
+	var pageTypeLen int32
+	err = binary.Read(file, binary.LittleEndian, &pageTypeLen)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected EOF while reading PageTypeLen")
 	}
 
-	// Deserialize other components...
-	// Continue the deserialization process...
+	pageTypeBytes := make([]byte, pageTypeLen)
+	err = binary.Read(file, binary.LittleEndian, &pageTypeBytes)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected EOF while reading PageType string")
+	}
+	p.Header.PageType = string(pageTypeBytes)
 
-	return nil
+	err = binary.Read(file, binary.LittleEndian, &p.Header.FreeSpacePtr)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected EOF while reading FreeSpacePtr")
+	}
+
+	var itemIdsLen int32
+	err = binary.Read(file, binary.LittleEndian, &itemIdsLen)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected EOF while reading ItemIdsLen")
+	}
+
+	for i := int32(0); i < itemIdsLen; i++ {
+		var itemId int32
+		err = binary.Read(file, binary.LittleEndian, &itemId)
+		if err != nil {
+			return nil, fmt.Errorf("unexpected EOF while reading ItemId %d", i)
+		}
+		p.ItemIds = append(p.ItemIds, itemId)
+	}
+
+	var itemsLen int32
+	err = binary.Read(file, binary.LittleEndian, &itemsLen)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected EOF while reading Items length")
+	}
+
+	for i := int32(0); i < itemsLen; i++ {
+		var itemLen int32
+		err = binary.Read(file, binary.LittleEndian, &itemLen)
+		if err != nil {
+			return nil, fmt.Errorf("unexpected EOF while reading Items length")
+		}
+		data := make([]byte, itemLen)
+		err = binary.Read(file, binary.LittleEndian, &data)
+		if err != nil {
+			return nil, fmt.Errorf("unexpected EOF while reading Items data")
+		}
+		p.Items = append(p.Items, Item{Data: data})
+	}
+
+	var freeSpaceLen int32
+	err = binary.Read(file, binary.LittleEndian, &freeSpaceLen)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected EOF while reading FreeSpace length")
+	}
+
+	p.FreeSpace = make([]byte, freeSpaceLen)
+	err = binary.Read(file, binary.LittleEndian, &p.FreeSpace)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected EOF while reading FreeSpace data")
+	}
+
+	var specialSpaceLen int32
+	err = binary.Read(file, binary.LittleEndian, &specialSpaceLen)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected EOF while reading SpecialSpace length")
+	}
+
+	p.SpecialSpace = make([]byte, specialSpaceLen)
+	err = binary.Read(file, binary.LittleEndian, &p.SpecialSpace)
+	if err != nil {
+		return nil, fmt.Errorf("unexpected EOF while reading SpecialSpace data")
+	}
+
+	return p, nil
 }
