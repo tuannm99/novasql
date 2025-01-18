@@ -1,10 +1,20 @@
-package storage
+package main
 
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 )
+
+const (
+	BlockSize = 8192
+)
+
+type LinePointer struct {
+	Offset int32
+	Length int32
+}
 
 type PageHeader struct {
 	PageNumber   int32
@@ -12,17 +22,17 @@ type PageHeader struct {
 	FreeSpacePtr int32
 }
 
-type Item struct {
+type Tuple struct {
 	Data []byte
 }
 
 type Page struct {
-	ID           int
 	Header       PageHeader
 	ItemIds      []int32
 	FreeSpace    []byte
-	Items        []Item
+	Tuple        []Tuple
 	SpecialSpace []byte
+	LinePointers []LinePointer
 }
 
 // Function to serialize Page struct and write to file
@@ -66,13 +76,13 @@ func (p *Page) WriteToFile(filename string) error {
 		}
 	}
 
-	itemsLen := int32(len(p.Items))
+	itemsLen := int32(len(p.Tuple))
 	err = binary.Write(file, binary.LittleEndian, itemsLen)
 	if err != nil {
 		return err
 	}
 
-	for _, item := range p.Items {
+	for _, item := range p.Tuple {
 		itemLen := int32(len(item.Data))
 		err = binary.Write(file, binary.LittleEndian, itemLen)
 		if err != nil {
@@ -172,7 +182,7 @@ func ReadFromFile(filename string) (*Page, error) {
 		if err != nil {
 			return nil, fmt.Errorf("unexpected EOF while reading Items data")
 		}
-		p.Items = append(p.Items, Item{Data: data})
+		p.Tuple = append(p.Tuple, Tuple{Data: data})
 	}
 
 	var freeSpaceLen int32
@@ -200,4 +210,92 @@ func ReadFromFile(filename string) (*Page, error) {
 	}
 
 	return p, nil
+}
+
+func (p *Page) InsertRow(data []byte) (int, error) {
+	if len(data) > len(p.FreeSpace) {
+		return -1, fmt.Errorf("not enough free space to insert row")
+	}
+
+	offset := len(p.Tuple) // Use the length of Tuple slice as the offset
+	lp := LinePointer{Offset: int32(offset), Length: int32(len(data))}
+	p.LinePointers = append(p.LinePointers, lp)
+	p.Tuple = append(p.Tuple, Tuple{Data: data})
+
+	// Update FreeSpace
+	fmt.Println(p.FreeSpace[len(data):])
+	p.FreeSpace = p.FreeSpace[len(data):]
+
+	return len(p.LinePointers) - 1, nil
+}
+
+func (p *Page) GetRow(index int) ([]byte, error) {
+	if index < 0 || index >= len(p.LinePointers) {
+		return nil, fmt.Errorf("index out of range")
+	}
+
+	lp := p.LinePointers[index]
+	if lp.Length == 0 {
+		return nil, fmt.Errorf("row is deleted")
+	}
+
+	tuple := p.Tuple[lp.Offset]
+	return tuple.Data[:lp.Length], nil
+}
+
+func (p *Page) UpdateRow(index int, newData []byte) error {
+	if index < 0 || index >= len(p.LinePointers) {
+		return fmt.Errorf("index out of range")
+	}
+
+	lp := p.LinePointers[index]
+	if int32(len(newData)) > lp.Length {
+		return fmt.Errorf("new data exceeds original length")
+	}
+
+	tuple := &p.Tuple[lp.Offset]
+	copy(tuple.Data, newData)
+	return nil
+}
+
+func (p *Page) DeleteRow(index int) error {
+	if index < 0 || index >= len(p.LinePointers) {
+		return fmt.Errorf("index out of range")
+	}
+
+	// Mark the row as deleted by setting length to 0 (logical deletion)
+	p.LinePointers[index].Length = 0
+	return nil
+}
+
+func main() {
+	page := &Page{
+		Header: PageHeader{
+			PageNumber:   1,
+			PageType:     "Data",
+			FreeSpacePtr: 100,
+		},
+		ItemIds:      []int32{0, 1},
+		FreeSpace:    []byte{0x00, 0x01, 0x02},
+		Tuple:        []Tuple{{Data: []byte("Item1")}, {Data: []byte("Item2")}},
+		SpecialSpace: []byte{0xFF},
+	}
+
+	err := page.WriteToFile("page_data.dat")
+	if err != nil {
+		log.Fatal("Error writing to file:", err)
+	}
+
+	loadedPage, err := ReadFromFile("page_data.dat")
+	if err != nil {
+		log.Fatal("Error reading from file:", err)
+	}
+
+	fmt.Printf("Loaded Page: %+v\n", loadedPage)
+	loadedPage.InsertRow([]byte{11})
+
+    row0, _ := loadedPage.GetRow(0)
+    fmt.Printf("❤❤❤ tuannm: [demo_file.go][297][row0]: %+v\n", row0)
+
+	fmt.Printf("Loaded Page: %+v\n", loadedPage)
 }
