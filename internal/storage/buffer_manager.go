@@ -6,6 +6,26 @@ import (
 	"sync"
 )
 
+type PageTableMetadata struct {
+	dirtyFlag    bool
+	pinCounter   int
+	trackingInfo interface{} // don't know what is included yet
+}
+
+type PageTable struct {
+	metadata PageTableMetadata
+
+	// we call lock when developing an application that work with a database
+    // for example page lock, tuple lock, table lock
+    // latch it just a lock but in database terminology/mechanism
+	latch sync.Mutex
+}
+
+type BufferPool struct {
+	frame       *Page
+	isDirectory bool
+}
+
 // BufferManager manages the buffer pool
 type BufferManager struct {
 	pool    map[int]*Page

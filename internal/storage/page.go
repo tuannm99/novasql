@@ -6,6 +6,9 @@ import (
 	"os"
 )
 
+type PageDirectory struct {
+}
+
 type PageHeader struct {
 	PageNumber   int32
 	PageType     string
