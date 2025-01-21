@@ -6,18 +6,17 @@ import (
 	"sync"
 )
 
-type PageTableMetadata struct {
-	dirtyFlag    bool
-	pinCounter   int
-	trackingInfo interface{} // don't know what is included yet
-}
-
 type PageTable struct {
-	metadata PageTableMetadata
+	metadata struct {
+		dirtyFlag    bool
+		pinCounter   int
+		trackingInfo interface{} // don't know what is included yet
+	}
+	isPin bool
 
 	// we call lock when developing an application that work with a database
-    // for example page lock, tuple lock, table lock
-    // latch it just a lock but in database terminology/mechanism
+	// for example page lock, tuple lock, table lock
+	// latch it just a lock but in database terminology/mechanism
 	latch sync.Mutex
 }
 
@@ -28,9 +27,10 @@ type BufferPool struct {
 
 // BufferManager manages the buffer pool
 type BufferManager struct {
-	pool    map[int]*Page
-	maxSize int
-	mutex   sync.Mutex
+	framePool map[int]*Page
+	maxSize   int
+	mutex     sync.Mutex
+	pageTable PageTable
 	// Channel for evicting pages when the buffer pool is full
 	pageEvict chan int
 }
@@ -38,7 +38,7 @@ type BufferManager struct {
 // NewBufferManager creates a new BufferManager
 func NewBufferManager(maxSize int) *BufferManager {
 	return &BufferManager{
-		pool:      make(map[int]*Page),
+		framePool: make(map[int]*Page),
 		maxSize:   maxSize,
 		pageEvict: make(chan int, maxSize),
 	}
@@ -49,7 +49,7 @@ func (bm *BufferManager) GetPage(pageID int) (*Page, error) {
 	bm.mutex.Lock()
 	defer bm.mutex.Unlock()
 
-	if page, exists := bm.pool[pageID]; exists {
+	if page, exists := bm.framePool[pageID]; exists {
 		return page, nil
 	}
 
@@ -59,9 +59,9 @@ func (bm *BufferManager) GetPage(pageID int) (*Page, error) {
 		return nil, err
 	}
 
-	bm.pool[pageID] = page
+	bm.framePool[pageID] = page
 	bm.pageEvict <- pageID
-	if len(bm.pool) > bm.maxSize {
+	if len(bm.framePool) > bm.maxSize {
 		bm.evictPage()
 	}
 
@@ -79,7 +79,7 @@ func (bm *BufferManager) evictPage() {
 	select {
 	case pageID := <-bm.pageEvict:
 		fmt.Println("Evicting page:", pageID)
-		delete(bm.pool, pageID)
+		delete(bm.framePool, pageID)
 	default:
 		fmt.Println("No pages to evict")
 	}
@@ -90,7 +90,7 @@ func (bm *BufferManager) MarkDirty(pageID int) error {
 	bm.mutex.Lock()
 	defer bm.mutex.Unlock()
 
-	if page, exists := bm.pool[pageID]; exists {
+	if page, exists := bm.framePool[pageID]; exists {
 		fmt.Println(page.ID)
 		return nil
 	}
