@@ -1,206 +1,167 @@
 package storage
 
 import (
-	"encoding/binary"
-	"fmt"
-	"os"
+	"unsafe"
 )
 
-type PageDirectory struct {
-}
+const (
+	OneB  = 1
+	OneKB = 1024
+	OneMB = OneKB * 1024
+	OneGB = OneMB * 1024
+)
 
+const (
+	// 8KB page size, similar to PostgreSQL
+	PageSize   = OneKB * 8
+	CanCompact = 0x01
+)
+
+// PageType enum
+type PageType uint8
+
+const (
+	Root PageType = iota + 1
+	Interior
+	Leaf
+)
+
+type PageDirectory struct{}
+
+// PageHeader represents metadata for a page
 type PageHeader struct {
-	PageNumber   int32
-	PageType     string
-	FreeSpacePtr int32
+	ID             uint32
+	Type           PageType
+	FreeStart      uint32 // Offset to start of free space
+	FreeEnd        uint32 // Offset to end of free space
+	TotalFreeSpace uint32 // FreeEnd - FreeStart
+	Flags          uint8
+
+	// LogSequenceNumber interface{}
+	// Lsn               interface{}
+	// Checksum          interface{}
+	// Special           interface{}
 }
 
-type Item struct {
-	Data []byte
-}
-
+// Page structure to hold data and metadata
 type Page struct {
-	ID           int
-	Header       PageHeader
-	ItemIds      []int32
-	FreeSpace    []byte
-	Items        []Item
-	SpecialSpace []byte
+	ID     uint32
+	Header PageHeader
+	Data   [PageSize]byte
 }
 
-// Function to serialize Page struct and write to file
-func (p *Page) WriteToFile(filename string) error {
-	file, err := os.Create(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	err = binary.Write(file, binary.LittleEndian, p.Header.PageNumber)
-	if err != nil {
-		return err
-	}
-
-	pageTypeLen := int32(len(p.Header.PageType))
-	err = binary.Write(file, binary.LittleEndian, pageTypeLen)
-	if err != nil {
-		return err
-	}
-	err = binary.Write(file, binary.LittleEndian, []byte(p.Header.PageType))
-	if err != nil {
-		return err
-	}
-
-	err = binary.Write(file, binary.LittleEndian, p.Header.FreeSpacePtr)
-	if err != nil {
-		return err
-	}
-
-	itemIdsLen := int32(len(p.ItemIds))
-	err = binary.Write(file, binary.LittleEndian, itemIdsLen)
-	if err != nil {
-		return err
-	}
-
-	for _, itemId := range p.ItemIds {
-		err = binary.Write(file, binary.LittleEndian, itemId)
-		if err != nil {
-			return err
-		}
-	}
-
-	itemsLen := int32(len(p.Items))
-	err = binary.Write(file, binary.LittleEndian, itemsLen)
-	if err != nil {
-		return err
-	}
-
-	for _, item := range p.Items {
-		itemLen := int32(len(item.Data))
-		err = binary.Write(file, binary.LittleEndian, itemLen)
-		if err != nil {
-			return err
-		}
-		err = binary.Write(file, binary.LittleEndian, item.Data)
-		if err != nil {
-			return err
-		}
-	}
-
-	freeSpaceLen := int32(len(p.FreeSpace))
-	err = binary.Write(file, binary.LittleEndian, freeSpaceLen)
-	if err != nil {
-		return err
-	}
-	err = binary.Write(file, binary.LittleEndian, p.FreeSpace)
-	if err != nil {
-		return err
-	}
-
-	specialSpaceLen := int32(len(p.SpecialSpace))
-	err = binary.Write(file, binary.LittleEndian, specialSpaceLen)
-	if err != nil {
-		return err
-	}
-	err = binary.Write(file, binary.LittleEndian, p.SpecialSpace)
-	if err != nil {
-		return err
-	}
-
-	return nil
+// CellPointer represents a pointer to a cell in a page
+type CellPointer struct {
+	Location uint32
+	Size     uint32
 }
 
-// Function to read a Page struct from file
-func ReadFromFile(filename string) (*Page, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, err
+// PointerList represents a list of cell pointers in a page
+type PointerList struct {
+	Start *CellPointer
+	Size  uint32
+}
+
+// Create a new page with an empty header
+func NewPage(pageType PageType, id uint32) *Page {
+	page := &Page{
+		ID: id,
+		Header: PageHeader{
+			ID:             id,
+			Type:           pageType,
+			FreeStart:      uint32(unsafe.Sizeof(PageHeader{})),
+			FreeEnd:        PageSize - 1,
+			TotalFreeSpace: PageSize - uint32(unsafe.Sizeof(PageHeader{})) - 1,
+		},
 	}
-	defer file.Close()
+	return page
+}
 
-	p := &Page{}
+// Compute index from cell pointer offset
+func GetIdFromCellPointerOffset(offset uint32) uint32 {
+	return (offset - uint32(unsafe.Sizeof(PageHeader{}))) / uint32(unsafe.Sizeof(CellPointer{}))
+}
 
-	err = binary.Read(file, binary.LittleEndian, &p.Header.PageNumber)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading PageNumber")
+// Compute offset from cell pointer index
+func GetOffsetCellPointerFromId(id uint32) uint32 {
+	return id*uint32(unsafe.Sizeof(CellPointer{})) + uint32(unsafe.Sizeof(PageHeader{}))
+}
+
+// Add a cell to the page, return index
+func AddCell(page *Page, cell []byte) uint32 {
+	header := &page.Header
+
+	cellSize := uint32(len(cell))
+	if header.TotalFreeSpace < cellSize+uint32(unsafe.Sizeof(CellPointer{})) {
+		panic("Not enough space in page")
 	}
 
-	var pageTypeLen int32
-	err = binary.Read(file, binary.LittleEndian, &pageTypeLen)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading PageTypeLen")
+	// Create cell pointer
+	cellPointer := CellPointer{
+		Location: header.FreeEnd - cellSize,
+		Size:     cellSize,
 	}
 
-	pageTypeBytes := make([]byte, pageTypeLen)
-	err = binary.Read(file, binary.LittleEndian, &pageTypeBytes)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading PageType string")
-	}
-	p.Header.PageType = string(pageTypeBytes)
+	// Copy cell into page (simulated with a slice)
+	copy(page.Data[cellPointer.Location:], cell)
 
-	err = binary.Read(file, binary.LittleEndian, &p.Header.FreeSpacePtr)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading FreeSpacePtr")
+	// Copy cell pointer to start of free space
+	pointerOffset := header.FreeStart
+	copy(page.Data[pointerOffset:], (*(*[unsafe.Sizeof(CellPointer{})]byte)(unsafe.Pointer(&cellPointer)))[:])
+
+	// Update page metadata
+	header.FreeEnd -= cellSize
+	header.FreeStart += uint32(unsafe.Sizeof(CellPointer{}))
+	header.TotalFreeSpace = header.FreeEnd - header.FreeStart
+
+	return GetIdFromCellPointerOffset(pointerOffset)
+}
+
+// Remove a cell from the page
+func RemoveCell(page *Page, index uint32) {
+	pointerOffset := GetOffsetCellPointerFromId(uint32(index))
+
+	header := &page.Header
+	header.Flags |= CanCompact
+
+	// Mark cell as deleted by setting its location to 0
+	cellPointer := (*CellPointer)(unsafe.Pointer(&page.Data[pointerOffset]))
+	cellPointer.Location = 0
+}
+
+// Get the list of cell pointers in the page
+func GetPointerList(page *Page) PointerList {
+	header := &page.Header
+	start := (*CellPointer)(unsafe.Pointer(&page.Data[unsafe.Sizeof(PageHeader{})]))
+
+	size := (header.FreeStart - uint32(unsafe.Sizeof(PageHeader{}))) / uint32(unsafe.Sizeof(CellPointer{}))
+	return PointerList{Start: start, Size: size}
+}
+
+// Compact the page, removing deleted cells
+// POSTGRESQL VACUMM
+func Compact(page *Page) {
+	header := &page.Header
+	if header.Flags&CanCompact == 0 {
+		return
 	}
 
-	var itemIdsLen int32
-	err = binary.Read(file, binary.LittleEndian, &itemIdsLen)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading ItemIdsLen")
-	}
+	newPage := NewPage(Root, 0)
+	pointerList := GetPointerList(page)
 
-	for i := int32(0); i < itemIdsLen; i++ {
-		var itemId int32
-		err = binary.Read(file, binary.LittleEndian, &itemId)
-		if err != nil {
-			return nil, fmt.Errorf("unexpected EOF while reading ItemId %d", i)
+	for i := uint32(0); i < pointerList.Size; i++ {
+		curPointer := (*CellPointer)(unsafe.Pointer(uintptr(unsafe.Pointer(pointerList.Start)) + uintptr(i*uint32(unsafe.Sizeof(CellPointer{})))))
+
+		if curPointer.Location != 0 {
+			cellData := page.Data[curPointer.Location : curPointer.Location+curPointer.Size]
+			AddCell(newPage, cellData)
 		}
-		p.ItemIds = append(p.ItemIds, itemId)
 	}
 
-	var itemsLen int32
-	err = binary.Read(file, binary.LittleEndian, &itemsLen)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading Items length")
-	}
+	header.FreeStart = newPage.Header.FreeStart
+	header.FreeEnd = newPage.Header.FreeEnd
+	header.TotalFreeSpace = header.FreeEnd - header.FreeStart
+	header.Flags &^= CanCompact
 
-	for i := int32(0); i < itemsLen; i++ {
-		var itemLen int32
-		err = binary.Read(file, binary.LittleEndian, &itemLen)
-		if err != nil {
-			return nil, fmt.Errorf("unexpected EOF while reading Items length")
-		}
-		data := make([]byte, itemLen)
-		err = binary.Read(file, binary.LittleEndian, &data)
-		if err != nil {
-			return nil, fmt.Errorf("unexpected EOF while reading Items data")
-		}
-		p.Items = append(p.Items, Item{Data: data})
-	}
-
-	var freeSpaceLen int32
-	err = binary.Read(file, binary.LittleEndian, &freeSpaceLen)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading FreeSpace length")
-	}
-
-	p.FreeSpace = make([]byte, freeSpaceLen)
-	err = binary.Read(file, binary.LittleEndian, &p.FreeSpace)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading FreeSpace data")
-	}
-
-	var specialSpaceLen int32
-	err = binary.Read(file, binary.LittleEndian, &specialSpaceLen)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading SpecialSpace length")
-	}
-
-	p.SpecialSpace = make([]byte, specialSpaceLen)
-	err = binary.Read(file, binary.LittleEndian, &p.SpecialSpace)
-	if err != nil {
-		return nil, fmt.Errorf("unexpected EOF while reading SpecialSpace data")
-	}
-
-	return p, nil
+	copy(page.Data[unsafe.Sizeof(PageHeader{}):], newPage.Data[unsafe.Sizeof(PageHeader{}):])
 }
