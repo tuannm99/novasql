@@ -1,6 +1,9 @@
 package storage
 
 import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
 	"unsafe"
 )
 
@@ -43,6 +46,13 @@ type PageHeader struct {
 	// Special           interface{}
 }
 
+// Page structure to hold data and metadata
+type Page struct {
+	ID     uint32
+	Header PageHeader
+	Data   [PageSize - uint32(unsafe.Sizeof(PageHeader{}))]byte
+}
+
 // CellPointer represents a pointer to a cell in a page
 type CellPointer struct {
 	Location uint32
@@ -56,18 +66,32 @@ type PointerList struct {
 }
 
 // Create a new page with an empty header
-func NewPage(pageType PageType, id uint32) *Page {
-	page := &Page{
+func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
+	// Try to load from disk
+	page, err := sm.LoadPage(id)
+	if err == nil {
+		return page, nil
+	}
+
+	// Create a new page if not found
+	page = &Page{
 		ID: id,
 		Header: PageHeader{
 			ID:             id,
 			Type:           pageType,
-			FreeStart:      uint32(unsafe.Sizeof(PageHeader{})),
+			FreeStart:      uint32(binary.Size(PageHeader{})),
 			FreeEnd:        PageSize - 1,
-			TotalFreeSpace: PageSize - uint32(unsafe.Sizeof(PageHeader{})) - 1,
+			TotalFreeSpace: PageSize - uint32(binary.Size(PageHeader{})) - 1,
 		},
 	}
-	return page
+
+	// Save new page to disk
+	err = sm.SavePage(page)
+	if err != nil {
+		return nil, err
+	}
+
+	return page, nil
 }
 
 // Compute index from cell pointer offset
@@ -133,17 +157,25 @@ func GetPointerList(page *Page) PointerList {
 
 // Compact the page, removing deleted cells
 // POSTGRESQL VACUMM
-func Compact(page *Page) {
+func Compact(sm *StorageManager, page *Page) error {
 	header := &page.Header
 	if header.Flags&CanCompact == 0 {
-		return
+		// No need to compact
+		return nil
 	}
 
-	newPage := NewPage(Root, 0)
+	// Create a temporary page with the same ID
+	newPage, err := NewPage(sm, page.Header.Type, page.ID)
+	if err != nil {
+		return err
+	}
+
+	// Get existing cell pointers
 	pointerList := GetPointerList(page)
 
 	for i := uint32(0); i < pointerList.Size; i++ {
-		curPointer := (*CellPointer)(unsafe.Pointer(uintptr(unsafe.Pointer(pointerList.Start)) + uintptr(i*uint32(unsafe.Sizeof(CellPointer{})))))
+		curPointer := (*CellPointer)(unsafe.Pointer(
+			uintptr(unsafe.Pointer(pointerList.Start)) + uintptr(i*uint32(unsafe.Sizeof(CellPointer{})))))
 
 		if curPointer.Location != 0 {
 			cellData := page.Data[curPointer.Location : curPointer.Location+curPointer.Size]
@@ -151,17 +183,49 @@ func Compact(page *Page) {
 		}
 	}
 
+	// Copy metadata from newPage
 	header.FreeStart = newPage.Header.FreeStart
 	header.FreeEnd = newPage.Header.FreeEnd
 	header.TotalFreeSpace = header.FreeEnd - header.FreeStart
 	header.Flags &^= CanCompact
 
-	copy(page.Data[unsafe.Sizeof(PageHeader{}):], newPage.Data[unsafe.Sizeof(PageHeader{}):])
+	// Copy compacted data back
+	copy(page.Data[:], newPage.Data[:])
+
+	// Save updated page to disk
+	return sm.SavePage(page)
 }
 
-// Page structure to hold data and metadata
-type Page struct {
-	ID     uint32
-	Header PageHeader
-	Data   [PageSize]byte
+func (p *Page) Serialize() []byte {
+	buf := new(bytes.Buffer)
+
+	// Write PageHeader
+	binary.Write(buf, binary.LittleEndian, p.Header)
+
+	// Write Data (rest of page)
+	buf.Write(p.Data[:])
+
+	// Fill remaining space with zeroes to ensure total size is 8192 bytes
+	remainingSize := PageSize - int(unsafe.Sizeof(p.Header)) - len(p.Data)
+	if remainingSize > 0 {
+		buf.Write(make([]byte, remainingSize)) // Padding with zeros
+	}
+
+	return buf.Bytes()
+}
+
+func (p *Page) Deserialize(data []byte) error {
+	if len(data) != PageSize {
+		return fmt.Errorf("invalid page size")
+	}
+
+	buf := bytes.NewReader(data)
+
+	// Read PageHeader
+	binary.Read(buf, binary.LittleEndian, &p.Header)
+
+	// Read Data
+	copy(p.Data[:], data[binary.Size(p.Header):])
+
+	return nil
 }
