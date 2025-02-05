@@ -197,21 +197,18 @@ func Compact(sm *StorageManager, page *Page) error {
 }
 
 func (p *Page) Serialize() []byte {
-	buf := new(bytes.Buffer)
+	// Allocate buffer size, without padding
+	buf := make([]byte, PageSize)
 
-	// Write PageHeader
-	binary.Write(buf, binary.LittleEndian, p.Header)
+	// Write PageHeader manually
+	offset := 0
+	copy(buf[offset:], (*(*[unsafe.Sizeof(PageHeader{})]byte)(unsafe.Pointer(&p.Header)))[:])
+	offset += int(unsafe.Sizeof(p.Header))
 
-	// Write Data (rest of page)
-	buf.Write(p.Data[:])
+	// Write Data (no padding)
+	copy(buf[offset:], p.Data[:])
 
-	// Fill remaining space with zeroes to ensure total size is 8192 bytes
-	remainingSize := PageSize - int(unsafe.Sizeof(p.Header)) - len(p.Data)
-	if remainingSize > 0 {
-		buf.Write(make([]byte, remainingSize)) // Padding with zeros
-	}
-
-	return buf.Bytes()
+	return buf
 }
 
 func (p *Page) Deserialize(data []byte) error {
