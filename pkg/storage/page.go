@@ -65,6 +65,11 @@ type PointerList struct {
 	Size  uint32
 }
 
+var (
+	PageHeaderSize  = uint32(binary.Size(PageHeader{}))
+	CellPointerSize = uint32(binary.Size(CellPointer{}))
+)
+
 // Create a new page with an empty header
 func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
 	// Try to load from disk
@@ -79,9 +84,9 @@ func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
 		Header: PageHeader{
 			ID:             id,
 			Type:           pageType,
-			FreeStart:      uint32(binary.Size(PageHeader{})),
+			FreeStart:      PageHeaderSize,
 			FreeEnd:        PageSize - 1,
-			TotalFreeSpace: PageSize - uint32(binary.Size(PageHeader{})) - 1,
+			TotalFreeSpace: PageSize - PageHeaderSize - 1,
 		},
 	}
 
@@ -96,12 +101,12 @@ func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
 
 // Compute index from cell pointer offset
 func GetIdFromCellPointerOffset(offset uint32) uint32 {
-	return (offset - uint32(unsafe.Sizeof(PageHeader{}))) / uint32(unsafe.Sizeof(CellPointer{}))
+	return (offset - PageHeaderSize) / CellPointerSize
 }
 
 // Compute offset from cell pointer index
 func GetOffsetCellPointerFromId(id uint32) uint32 {
-	return id*uint32(unsafe.Sizeof(CellPointer{})) + uint32(unsafe.Sizeof(PageHeader{}))
+	return id*CellPointerSize + PageHeaderSize
 }
 
 // Add a cell to the page, return index
@@ -109,7 +114,7 @@ func AddCell(page *Page, cell []byte) uint32 {
 	header := &page.Header
 
 	cellSize := uint32(len(cell))
-	if header.TotalFreeSpace < cellSize+uint32(unsafe.Sizeof(CellPointer{})) {
+	if header.TotalFreeSpace < cellSize+CellPointerSize {
 		panic("Not enough space in page")
 	}
 
@@ -128,7 +133,7 @@ func AddCell(page *Page, cell []byte) uint32 {
 
 	// Update page metadata
 	header.FreeEnd -= cellSize
-	header.FreeStart += uint32(unsafe.Sizeof(CellPointer{}))
+	header.FreeStart += CellPointerSize
 	header.TotalFreeSpace = header.FreeEnd - header.FreeStart
 
 	return GetIdFromCellPointerOffset(pointerOffset)
@@ -151,7 +156,7 @@ func GetPointerList(page *Page) PointerList {
 	header := &page.Header
 	start := (*CellPointer)(unsafe.Pointer(&page.Data[unsafe.Sizeof(PageHeader{})]))
 
-	size := (header.FreeStart - uint32(unsafe.Sizeof(PageHeader{}))) / uint32(unsafe.Sizeof(CellPointer{}))
+	size := (header.FreeStart - PageHeaderSize) / CellPointerSize
 	return PointerList{Start: start, Size: size}
 }
 
@@ -197,21 +202,18 @@ func Compact(sm *StorageManager, page *Page) error {
 }
 
 func (p *Page) Serialize() []byte {
-	buf := new(bytes.Buffer)
+	// Allocate buffer size, without padding
+	buf := make([]byte, PageSize)
 
-	// Write PageHeader
-	binary.Write(buf, binary.LittleEndian, p.Header)
+	// Write PageHeader manually
+	offset := 0
+	copy(buf[offset:], (*(*[unsafe.Sizeof(PageHeader{})]byte)(unsafe.Pointer(&p.Header)))[:])
+	offset += int(unsafe.Sizeof(p.Header))
 
-	// Write Data (rest of page)
-	buf.Write(p.Data[:])
+	// Write Data (no padding)
+	copy(buf[offset:], p.Data[:])
 
-	// Fill remaining space with zeroes to ensure total size is 8192 bytes
-	remainingSize := PageSize - int(unsafe.Sizeof(p.Header)) - len(p.Data)
-	if remainingSize > 0 {
-		buf.Write(make([]byte, remainingSize)) // Padding with zeros
-	}
-
-	return buf.Bytes()
+	return buf
 }
 
 func (p *Page) Deserialize(data []byte) error {
