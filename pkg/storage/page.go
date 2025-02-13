@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"unsafe"
 )
 
 const (
@@ -54,7 +53,7 @@ type Page struct {
 }
 
 func (p *Page) GetDataSize() int {
-	return PageSize - int(PageHeaderSize)
+	return PageSize - int(DefaultPageHeaderSize)
 }
 
 func (p *Page) GetHeaderSize() int {
@@ -69,13 +68,13 @@ type CellPointer struct {
 
 // PointerList represents a list of cell pointers in a page
 type PointerList struct {
-	Start *CellPointer
+	Start []CellPointer
 	Size  uint32
 }
 
 var (
-	PageHeaderSize  = uint32(binary.Size(PageHeader{}))
-	CellPointerSize = uint32(binary.Size(CellPointer{}))
+	DefaultPageHeaderSize  = uint32(binary.Size(PageHeader{}))
+	DefaultCellPointerSize = uint32(binary.Size(CellPointer{}))
 )
 
 // Create a new page with an empty header
@@ -92,9 +91,9 @@ func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
 		Header: PageHeader{
 			ID:             id,
 			Type:           pageType,
-			FreeStart:      PageHeaderSize,
+			FreeStart:      DefaultPageHeaderSize,
 			FreeEnd:        PageSize - 1,
-			TotalFreeSpace: PageSize - PageHeaderSize - 1,
+			TotalFreeSpace: PageSize - DefaultPageHeaderSize - 1,
 		},
 		Data: []byte{},
 	}
@@ -110,12 +109,12 @@ func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
 
 // Compute index from cell pointer offset
 func GetIdFromCellPointerOffset(offset uint32) uint32 {
-	return (offset - PageHeaderSize) / CellPointerSize
+	return (offset - DefaultPageHeaderSize) / DefaultCellPointerSize
 }
 
 // Compute offset from cell pointer index
 func GetOffsetCellPointerFromId(id uint32) uint32 {
-	return id*CellPointerSize + PageHeaderSize
+	return id*DefaultCellPointerSize + DefaultPageHeaderSize
 }
 
 // Add a cell to the page, return index
@@ -123,7 +122,7 @@ func AddCell(page *Page, cell []byte) uint32 {
 	header := &page.Header
 
 	cellSize := uint32(len(cell))
-	if header.TotalFreeSpace < cellSize+CellPointerSize {
+	if header.TotalFreeSpace < cellSize+DefaultCellPointerSize {
 		panic("Not enough space in page")
 	}
 
@@ -138,11 +137,14 @@ func AddCell(page *Page, cell []byte) uint32 {
 
 	// Copy cell pointer to start of free space
 	pointerOffset := header.FreeStart
-	copy(page.Data[pointerOffset:], (*(*[unsafe.Sizeof(CellPointer{})]byte)(unsafe.Pointer(&cellPointer)))[:])
+	cellPointerBytes := make([]byte, DefaultCellPointerSize)
+	binary.LittleEndian.PutUint32(cellPointerBytes[:4], cellPointer.Location)
+	binary.LittleEndian.PutUint32(cellPointerBytes[4:], cellPointer.Size)
+	copy(page.Data[pointerOffset:], cellPointerBytes)
 
 	// Update page metadata
 	header.FreeEnd -= cellSize
-	header.FreeStart += CellPointerSize
+	header.FreeStart += DefaultCellPointerSize
 	header.TotalFreeSpace = header.FreeEnd - header.FreeStart
 
 	return GetIdFromCellPointerOffset(pointerOffset)
@@ -150,22 +152,32 @@ func AddCell(page *Page, cell []byte) uint32 {
 
 // Remove a cell from the page
 func RemoveCell(page *Page, index uint32) {
-	pointerOffset := GetOffsetCellPointerFromId(uint32(index))
+	pointerOffset := GetOffsetCellPointerFromId(index)
 
 	header := &page.Header
 	header.Flags |= CanCompact
 
 	// Mark cell as deleted by setting its location to 0
-	cellPointer := (*CellPointer)(unsafe.Pointer(&page.Data[pointerOffset]))
-	cellPointer.Location = 0
+	cellPointerBytes := page.Data[pointerOffset : pointerOffset+DefaultCellPointerSize]
+	// cellPointer := CellPointer{}
+	binary.LittleEndian.PutUint32(cellPointerBytes[:4], 0)
+	binary.LittleEndian.PutUint32(cellPointerBytes[4:], 0)
 }
 
 // Get the list of cell pointers in the page
 func GetPointerList(page *Page) PointerList {
 	header := &page.Header
-	start := (*CellPointer)(unsafe.Pointer(&page.Data[unsafe.Sizeof(PageHeader{})]))
+	start := []CellPointer{}
+	offset := DefaultPageHeaderSize
 
-	size := (header.FreeStart - PageHeaderSize) / CellPointerSize
+	for offset < uint32(header.FreeStart) {
+		cellPointer := CellPointer{}
+		binary.Read(bytes.NewReader(page.Data[offset:offset+DefaultCellPointerSize]), binary.LittleEndian, &cellPointer)
+		start = append(start, cellPointer)
+		offset += uint32(DefaultCellPointerSize)
+	}
+
+	size := (header.FreeStart - DefaultPageHeaderSize) / DefaultCellPointerSize
 	return PointerList{Start: start, Size: size}
 }
 
@@ -187,10 +199,7 @@ func Compact(sm *StorageManager, page *Page) error {
 	// Get existing cell pointers
 	pointerList := GetPointerList(page)
 
-	for i := uint32(0); i < pointerList.Size; i++ {
-		curPointer := (*CellPointer)(unsafe.Pointer(
-			uintptr(unsafe.Pointer(pointerList.Start)) + uintptr(i*uint32(unsafe.Sizeof(CellPointer{})))))
-
+	for _, curPointer := range pointerList.Start {
 		if curPointer.Location != 0 {
 			cellData := page.Data[curPointer.Location : curPointer.Location+curPointer.Size]
 			AddCell(newPage, cellData)
