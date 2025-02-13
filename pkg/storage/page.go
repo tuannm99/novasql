@@ -50,7 +50,15 @@ type PageHeader struct {
 type Page struct {
 	ID     uint32
 	Header PageHeader
-	Data   [PageSize - uint32(unsafe.Sizeof(PageHeader{}))]byte
+	Data   []byte
+}
+
+func (p *Page) GetDataSize() int {
+	return PageSize - int(PageHeaderSize)
+}
+
+func (p *Page) GetHeaderSize() int {
+	return binary.Size(p.Header)
 }
 
 // CellPointer represents a pointer to a cell in a page
@@ -88,6 +96,7 @@ func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
 			FreeEnd:        PageSize - 1,
 			TotalFreeSpace: PageSize - PageHeaderSize - 1,
 		},
+		Data: []byte{},
 	}
 
 	// Save new page to disk
@@ -201,19 +210,21 @@ func Compact(sm *StorageManager, page *Page) error {
 	return sm.SavePage(page)
 }
 
-func (p *Page) Serialize() []byte {
-	// Allocate buffer size, without padding
-	buf := make([]byte, PageSize)
+func (p *Page) Serialize() ([]byte, error) {
+	// Preallocated buffer
+	buf := bytes.NewBuffer(make([]byte, 0, PageSize))
 
-	// Write PageHeader manually
-	offset := 0
-	copy(buf[offset:], (*(*[unsafe.Sizeof(PageHeader{})]byte)(unsafe.Pointer(&p.Header)))[:])
-	offset += int(unsafe.Sizeof(p.Header))
+	// Write PageHeader
+	if err := binary.Write(buf, binary.LittleEndian, &p.Header); err != nil {
+		return nil, err
+	}
 
-	// Write Data (no padding)
-	copy(buf[offset:], p.Data[:])
+	// Write Data
+	if err := binary.Write(buf, binary.LittleEndian, p.Data[:]); err != nil {
+		return nil, err
+	}
 
-	return buf
+	return buf.Bytes(), nil
 }
 
 func (p *Page) Deserialize(data []byte) error {
@@ -227,7 +238,8 @@ func (p *Page) Deserialize(data []byte) error {
 	binary.Read(buf, binary.LittleEndian, &p.Header)
 
 	// Read Data
-	copy(p.Data[:], data[binary.Size(p.Header):])
+	headerSize := p.GetHeaderSize()
+	p.Data = data[headerSize:]
 
 	return nil
 }
