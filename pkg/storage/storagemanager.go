@@ -1,8 +1,8 @@
 package storage
 
 import (
-	// "encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -34,7 +34,7 @@ func (sm *StorageManager) GetSegmentPath(pageID uint32) string {
 // WritePage writes a page to its corresponding segment file
 func (sm *StorageManager) WritePage(pageID uint32, data []byte) error {
 	if len(data) > PageSize {
-		return fmt.Errorf("page must smaller than %d bytes", PageSize)
+		return fmt.Errorf("StorageManager::WritePage page must smaller than %d bytes", PageSize)
 	}
 
 	segmentPath := sm.GetSegmentPath(pageID)
@@ -43,7 +43,7 @@ func (sm *StorageManager) WritePage(pageID uint32, data []byte) error {
 	// Ensure the directory exists
 	dir := filepath.Dir(segmentPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
+		return fmt.Errorf("StorageManager::WritePage makedir %v", err)
 	}
 
 	// Open file (create if not exists)
@@ -61,7 +61,10 @@ func (sm *StorageManager) WritePage(pageID uint32, data []byte) error {
 
 	// Write page data
 	_, err = file.Write(data)
-	return err
+	if err != nil {
+		return fmt.Errorf("StorageManager::WritePage %v", err)
+	}
+	return nil
 }
 
 // ReadPage reads a page from disk
@@ -71,14 +74,14 @@ func (sm *StorageManager) ReadPage(pageID uint32) ([]byte, error) {
 
 	file, err := os.Open(segmentPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("StorageManager::ReadPage %v", err)
 	}
 	defer file.Close()
 
 	data := make([]byte, PageSize)
 	_, err = file.ReadAt(data, offset)
-	if err != nil {
-		return nil, err
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("StorageManager::ReadPage %v", err)
 	}
 
 	return data, nil
@@ -100,6 +103,9 @@ func (sm *StorageManager) LoadPage(pageID uint32) (*Page, error) {
 }
 
 func (sm *StorageManager) SavePage(page *Page) error {
-	data := page.Serialize()
+	data, err := page.Serialize()
+	if err != nil {
+		return fmt.Errorf("StorageManager::SavePage %v", err)
+	}
 	return sm.WritePage(page.ID, data)
 }

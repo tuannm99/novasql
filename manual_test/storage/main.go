@@ -7,31 +7,25 @@ import (
 )
 
 func main() {
-
-	// Initialize StorageManager
 	sm := storage.NewStorageManager("./data")
 
-	// Create a new page
 	page, err := storage.NewPage(sm, storage.Leaf, 0)
 	if err != nil {
 		panic(err)
 	}
 
-	// Modify page
 	page.Header.Flags |= storage.CanCompact
 
-	// Save updated page
 	err = sm.SavePage(page)
 	if err != nil {
 		panic(err)
 	}
 
-	// Load page from disk
 	loadedPage, err := sm.LoadPage(0)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("Loaded Page ID: %d, Flags: %d\n", loadedPage.ID, loadedPage.Header.Flags)
-
+	fmt.Printf("Loaded Page ID: %d, Flags: %d, Data: %d \n", loadedPage.ID,
+		loadedPage.Header.Flags, loadedPage.Data)
 }
