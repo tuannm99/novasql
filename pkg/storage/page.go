@@ -52,12 +52,18 @@ type Page struct {
 	Data   []byte
 }
 
-func (p *Page) GetDataSize() int {
-	return PageSize - int(DefaultPageHeaderSize)
-}
+var (
+	DefaultPageHeaderSize  = uint32(binary.Size(PageHeader{}))
+	DefaultCellPointerSize = uint32(binary.Size(CellPointer{}))
+	DefaultPageDataSize    = PageSize - DefaultPageHeaderSize
+)
 
 func (p *Page) GetHeaderSize() int {
 	return binary.Size(p.Header)
+}
+
+func (p *Page) GetDataSize() int {
+	return PageSize - p.GetHeaderSize()
 }
 
 // CellPointer represents a pointer to a cell in a page
@@ -71,11 +77,6 @@ type PointerList struct {
 	Start []CellPointer
 	Size  uint32
 }
-
-var (
-	DefaultPageHeaderSize  = uint32(binary.Size(PageHeader{}))
-	DefaultCellPointerSize = uint32(binary.Size(CellPointer{}))
-)
 
 // Create a new page with an empty header
 func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {

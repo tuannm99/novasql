@@ -1,16 +1,22 @@
-package storage
+// buffermanager manage pool of in-memeory pages, which are loaded from disk for cached,
+// that means we need to make sure that both page in memory and disk are consistants,
+// locking strategy?
+// invalidate the page in pool?
+package buffermanager
 
 import (
 	// "errors"
 	// "fmt"
 	"sync"
+
+	"github.com/tuannm99/novasql/pkg/storage"
 )
 
 type PageTable struct {
 	metadata struct {
 		dirtyFlag    bool
 		pinCounter   int
-		trackingInfo interface{} // don't know what is included yet
+		// trackingInfo interface{} // don't know what is included yet
 	}
 	isPin bool
 
@@ -21,13 +27,14 @@ type PageTable struct {
 }
 
 type BufferPool struct {
-	frame       *Page
+	frame       *storage.Page
 	isDirectory bool
 }
 
 // BufferManager manages the buffer pool
 type BufferManager struct {
-	framePool map[int]*Page
+	framePool map[int]*storage.Page
+
 	maxSize   int
 	mutex     sync.Mutex
 	pageTable PageTable
@@ -38,7 +45,7 @@ type BufferManager struct {
 // NewBufferManager creates a new BufferManager
 func NewBufferManager(maxSize int) *BufferManager {
 	return &BufferManager{
-		framePool: make(map[int]*Page),
+		framePool: make(map[int]*storage.Page),
 		maxSize:   maxSize,
 		pageEvict: make(chan int, maxSize),
 	}
