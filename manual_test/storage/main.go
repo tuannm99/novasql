@@ -10,7 +10,7 @@ import (
 func main() {
 	sm := storage.NewStorageManager("./data")
 
-	page, err := storage.NewPage(sm, storage.Leaf, 0)
+	page, err := storage.NewPage(sm, storage.Slotted, 0)
 	if err != nil {
 		panic(err)
 	}

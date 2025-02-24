@@ -8,6 +8,20 @@
 
 ## Lesson learned
 
+### programming
+
+- Binary, bytes processing
+- Operating system
+- Basic networking
+- Data structures: bloom filter, bplustree, clock, LRU cache, sorting algorithms
+- Caching strategy
+- ORM from scratch
+- Database internal
+- Deeper understand of ACID, how it implemented
+- Concurrent programming: dealing with locks, race condition, data race, concurrent pattern (only go)
+
+### others
+
 - Time management is an important aspect to consider when starting a project, including research time and breaking big problems into smaller pieces.
 - We don't want to mess with "unsafe".
 - Using third-party packages for better concurrent processing.

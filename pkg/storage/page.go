@@ -23,9 +23,8 @@ const (
 type PageType uint8
 
 const (
-	Root PageType = iota + 1
-	Interior
-	Leaf
+	Slotted PageType = iota + 1
+	Directory
 )
 
 type PageDirectory struct{}
