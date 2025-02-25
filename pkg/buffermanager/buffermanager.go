@@ -14,8 +14,8 @@ import (
 
 type PageTable struct {
 	metadata struct {
-		dirtyFlag    bool
-		pinCounter   int
+		dirtyFlag  bool
+		pinCounter int
 		// trackingInfo interface{} // don't know what is included yet
 	}
 	isPin bool
@@ -26,14 +26,9 @@ type PageTable struct {
 	latch sync.Mutex
 }
 
-type BufferPool struct {
-	frame       *storage.Page
-	isDirectory bool
-}
-
 // BufferManager manages the buffer pool
 type BufferManager struct {
-	framePool map[int]*storage.Page
+	pool map[int]*storage.Page
 
 	maxSize   int
 	mutex     sync.Mutex
@@ -45,7 +40,7 @@ type BufferManager struct {
 // NewBufferManager creates a new BufferManager
 func NewBufferManager(maxSize int) *BufferManager {
 	return &BufferManager{
-		framePool: make(map[int]*storage.Page),
+		pool:      make(map[int]*storage.Page),
 		maxSize:   maxSize,
 		pageEvict: make(chan int, maxSize),
 	}
@@ -56,7 +51,7 @@ func NewBufferManager(maxSize int) *BufferManager {
 // 	bm.mutex.Lock()
 // 	defer bm.mutex.Unlock()
 //
-// 	if page, exists := bm.framePool[pageID]; exists {
+// 	if page, exists := bm.pool[pageID]; exists {
 // 		return page, nil
 // 	}
 //
@@ -66,9 +61,9 @@ func NewBufferManager(maxSize int) *BufferManager {
 // 		return nil, err
 // 	}
 //
-// 	bm.framePool[pageID] = page
+// 	bm.pool[pageID] = page
 // 	bm.pageEvict <- pageID
-// 	if len(bm.framePool) > bm.maxSize {
+// 	if len(bm.pool) > bm.maxSize {
 // 		bm.evictPage()
 // 	}
 //
@@ -86,7 +81,7 @@ func NewBufferManager(maxSize int) *BufferManager {
 // 	select {
 // 	case pageID := <-bm.pageEvict:
 // 		fmt.Println("Evicting page:", pageID)
-// 		delete(bm.framePool, pageID)
+// 		delete(bm.pool, pageID)
 // 	default:
 // 		fmt.Println("No pages to evict")
 // 	}
@@ -97,7 +92,7 @@ func NewBufferManager(maxSize int) *BufferManager {
 // 	bm.mutex.Lock()
 // 	defer bm.mutex.Unlock()
 //
-// 	if page, exists := bm.framePool[pageID]; exists {
+// 	if page, exists := bm.pool[pageID]; exists {
 // 		fmt.Println(page.ID)
 // 		return nil
 // 	}
