@@ -165,20 +165,26 @@ func RemoveCell(page *Page, index uint32) {
 }
 
 // Get the list of cell pointers in the page
-func GetPointerList(page *Page) PointerList {
+func GetPointerList(page *Page) (error, PointerList) {
 	header := &page.Header
 	start := []CellPointer{}
 	offset := DefaultPageHeaderSize
 
-	for offset < uint32(header.FreeStart) {
+	for offset < header.FreeStart {
 		cellPointer := CellPointer{}
-		binary.Read(bytes.NewReader(page.Data[offset:offset+DefaultCellPointerSize]), binary.LittleEndian, &cellPointer)
+		err := binary.Read(
+			bytes.NewReader(page.Data[offset:offset+DefaultCellPointerSize]),
+			binary.LittleEndian,
+			&cellPointer)
+		if err != nil {
+			return fmt.Errorf("Page::GetPointerList %v", err), PointerList{}
+		}
 		start = append(start, cellPointer)
-		offset += uint32(DefaultCellPointerSize)
+		offset += DefaultCellPointerSize
 	}
 
 	size := (header.FreeStart - DefaultPageHeaderSize) / DefaultCellPointerSize
-	return PointerList{Start: start, Size: size}
+	return nil, PointerList{Start: start, Size: size}
 }
 
 // Compact the page, removing deleted cells
@@ -197,7 +203,11 @@ func Compact(sm *StorageManager, page *Page) error {
 	}
 
 	// Get existing cell pointers
-	pointerList := GetPointerList(page)
+	err, pointerList := GetPointerList(page)
+
+	if err != nil {
+		return fmt.Errorf("Compact %v", err)
+	}
 
 	for _, curPointer := range pointerList.Start {
 		if curPointer.Location != 0 {
@@ -244,7 +254,11 @@ func (p *Page) Deserialize(data []byte) error {
 	buf := bytes.NewReader(data)
 
 	// Read PageHeader
-	binary.Read(buf, binary.LittleEndian, &p.Header)
+	err := binary.Read(buf, binary.LittleEndian, &p.Header)
+
+	if err != nil {
+		return fmt.Errorf("Page::Deserialize %v", err)
+	}
 
 	// Read Data
 	headerSize := p.GetHeaderSize()

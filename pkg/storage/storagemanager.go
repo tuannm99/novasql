@@ -12,6 +12,17 @@ const (
 	// Faster backups & recovery (smaller file chunks).
 	// Better parallel I/O (multiple segments can be read/written independently).
 	SegmentSize = 1 * 1024 * 1024 * 1024 // 1GB per segment
+
+	FileMode0644 = 0644 // rw-r--r--
+	FileMode0664 = 0664 // rw-rw-r--
+	FileMode0600 = 0600 // rw-------
+	FileMode0755 = 0755 // rwxr-xr-x
+	FileMode0777 = 0777 // rwxrwxrwx
+	FileMode0700 = 0700 // rwx------
+	FileMode0555 = 0555 // r-xr-xr-x
+	FileMode0400 = 0400 // r--------
+	FileMode0200 = 0200 // -w-------
+	FileMode0111 = 0111 // --x--x--x)
 )
 
 // managing database files
@@ -42,12 +53,12 @@ func (sm *StorageManager) WritePage(pageID uint32, data []byte) error {
 
 	// Ensure the directory exists
 	dir := filepath.Dir(segmentPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, FileMode0755); err != nil {
 		return fmt.Errorf("StorageManager::WritePage makedir %v", err)
 	}
 
 	// Open file (create if not exists)
-	file, err := os.OpenFile(segmentPath, os.O_RDWR|os.O_CREATE, 0644)
+	file, err := os.OpenFile(segmentPath, os.O_RDWR|os.O_CREATE, FileMode0664)
 	if err != nil {
 		return err
 	}
