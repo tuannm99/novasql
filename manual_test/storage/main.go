@@ -8,7 +8,10 @@ import (
 )
 
 func main() {
-	sm := storage.NewStorageManager("./data")
+	sm, err := storage.NewStorageManager("./data")
+	if err != nil {
+		panic(err)
+	}
 
 	page, err := storage.NewPage(sm, storage.Slotted, 0)
 	if err != nil {

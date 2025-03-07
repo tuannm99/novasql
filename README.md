@@ -1,11 +1,5 @@
 # Sql Implementations, one for all projects.
 
-## Why?
-
-- As a Backend Engineer, my daily work mostly involved CRUD operations with databases, APIs, architectures, third-party integrations, and additional business logic. The thing is, before going further, deep diving into a DB is a good point, but I realized I lacked many fundamental aspects of engineering.
-- DBMS is a challenging thing to implement because it involves all the complex aspects of programming: from fundamentals like operating systems, networking, and parallel/concurrent programming, to more advanced topics like distributed systems, caching, scaling, and various complex data structures that need to be understood.
-- I want to make a change and truly understand what happens behind the scenes, so I decided to create a database one from scratch.
-
 ## Lesson learned
 
 ### programming
