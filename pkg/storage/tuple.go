@@ -12,7 +12,7 @@ type Tuple struct {
 }
 
 // InsertTuple inserts a tuple into the page
-func (p *Page) InsertTuple(tuple Tuple, txID uint64) error {
+func (p *Page) InsertTuple(tuple Tuple) error {
 	if p.Header.Type != Slotted {
 		return NewStorageError(ErrCodeInvalidOperation, "Cannot insert tuple into non-slotted page", nil)
 	}
@@ -23,7 +23,7 @@ func (p *Page) InsertTuple(tuple Tuple, txID uint64) error {
 	copy(tupleData[8:], tuple.Data)
 
 	// Add as a cell
-	_, err := AddCell(p, tupleData, txID)
+	_, err := AddCell(p, tupleData)
 	if err != nil {
 		return err
 	}

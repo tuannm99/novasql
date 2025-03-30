@@ -2,6 +2,7 @@ package database
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/tuannm99/novasql/pkg/storage"
 )
@@ -20,6 +21,7 @@ type (
 		ctx            Context
 		WorkDir        string
 		txID           uint64 // Current transaction ID
+		operationLock  sync.Mutex
 	}
 
 	Context struct {
@@ -43,7 +45,7 @@ type (
 
 	Column struct {
 		name        string
-		dataTypes   interface{}
+		dataTypes   any
 		constraints []Constraint
 	}
 
@@ -117,7 +119,7 @@ func (db *NovaSql) InsertTuple(tableName string, tuple storage.Tuple) error {
 		return fmt.Errorf("table does not exist")
 	}
 
-	txID := db.NextTxID()
+	// txID := db.NextTxID()
 
 	// Try to insert in existing pages
 	for _, pageID := range table.pages {
@@ -127,7 +129,7 @@ func (db *NovaSql) InsertTuple(tableName string, tuple storage.Tuple) error {
 		}
 
 		// Try to insert tuple
-		err = page.InsertTuple(tuple, txID)
+		err = page.InsertTuple(tuple)
 		if err == nil {
 			// Successfully inserted
 			return db.storageManager.SavePage(page)
@@ -151,7 +153,7 @@ func (db *NovaSql) InsertTuple(tableName string, tuple storage.Tuple) error {
 	}
 
 	// Insert into new page
-	err = newPage.InsertTuple(tuple, txID)
+	err = newPage.InsertTuple(tuple)
 	if err != nil {
 		return fmt.Errorf("failed to insert tuple: %v", err)
 	}

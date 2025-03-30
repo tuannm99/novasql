@@ -58,7 +58,7 @@ func testPageOperations(sm *storage.StorageManager) {
 	// CREATE: Add a cell to the page
 	fmt.Println("Adding cell to page...")
 	testData := []byte("Hello, NovaSQL!")
-	cellIndex, err := storage.AddCell(page, testData, 1) // txID = 1
+	cellIndex, err := storage.AddCell(page, testData)
 	if err != nil {
 		fmt.Printf("Failed to add cell: %v\n", err)
 		return
@@ -90,14 +90,14 @@ func testPageOperations(sm *storage.StorageManager) {
 	// UPDATE: Modify the cell
 	fmt.Println("Updating cell...")
 	// To update a cell, we need to remove it and add a new one
-	err = storage.RemoveCell(loadedPage, cellIndex, 2) // txID = 2
+	err = storage.RemoveCell(loadedPage, cellIndex)
 	if err != nil {
 		fmt.Printf("Failed to remove cell: %v\n", err)
 		return
 	}
 
 	updatedData := []byte("Updated NovaSQL data!")
-	newCellIndex, err := storage.AddCell(loadedPage, updatedData, 2) // txID = 2
+	newCellIndex, err := storage.AddCell(loadedPage, updatedData)
 	if err != nil {
 		fmt.Printf("Failed to add updated cell: %v\n", err)
 		return
@@ -127,7 +127,7 @@ func testPageOperations(sm *storage.StorageManager) {
 
 	// DELETE: Remove the cell
 	fmt.Println("Deleting cell...")
-	err = storage.RemoveCell(loadedPage, newCellIndex, 3) // txID = 3
+	err = storage.RemoveCell(loadedPage, newCellIndex)
 	if err != nil {
 		fmt.Printf("Failed to delete cell: %v\n", err)
 		return
@@ -190,7 +190,7 @@ func testTupleOperations(sm *storage.StorageManager, pd *storage.PageDirectory) 
 		Data: []byte("First record"),
 	}
 
-	err = page.InsertTuple(tuple1, 1) // txID = 1
+	err = page.InsertTuple(tuple1)
 	if err != nil {
 		fmt.Printf("Failed to insert tuple: %v\n", err)
 		return
@@ -201,7 +201,7 @@ func testTupleOperations(sm *storage.StorageManager, pd *storage.PageDirectory) 
 		Data: []byte("Second record"),
 	}
 
-	err = page.InsertTuple(tuple2, 1) // txID = 1
+	err = page.InsertTuple(tuple2)
 	if err != nil {
 		fmt.Printf("Failed to insert second tuple: %v\n", err)
 		return
@@ -247,7 +247,7 @@ func testTupleOperations(sm *storage.StorageManager, pd *storage.PageDirectory) 
 		Data: []byte("First record (updated)"),
 	}
 
-	err = loadedPage.InsertTuple(tuple1Updated, 2) // txID = 2
+	err = loadedPage.InsertTuple(tuple1Updated)
 	if err != nil {
 		fmt.Printf("Failed to insert updated tuple: %v\n", err)
 		return
@@ -371,4 +371,3 @@ func testBTreeOperations(sm *storage.StorageManager) {
 		fmt.Printf("Found after loading: cherry -> %s\n", string(value))
 	}
 }
-

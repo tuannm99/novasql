@@ -71,6 +71,91 @@ func NewBufferPool(bufferSize, maxBuffers int, sm *StorageManager, policy Evicti
 	return pool
 }
 
+// AddPage adds a new page to the buffer pool
+// This is specifically for pages that are newly created and don't yet exist on disk
+func (bp *BufferPool) AddPage(page *Page) error {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
+	pageID := page.ID
+
+	// Check if page already exists in the buffer pool
+	if _, found := bp.buffers[pageID]; found {
+		return NewStorageError(
+			ErrCodeInvalidOperation,
+			fmt.Sprintf("Page %d already exists in buffer pool", pageID),
+			nil,
+		)
+	}
+
+	// Serialize the page
+	pageData := make([]byte, bp.bufferSize)
+
+	// Copy header to page data
+	headerBytes, err := page.serializeHeader()
+	if err != nil {
+		return NewStorageError(ErrCodeInvalidOperation, "Failed to serialize page header", err)
+	}
+	copy(pageData, headerBytes)
+
+	// Copy page data
+	if len(page.Data) > 0 {
+		copy(pageData[len(headerBytes):], page.Data)
+	}
+
+	// Allocate a buffer
+	var bufDesc *BufferDescriptor
+	if bp.freeList.Len() > 0 {
+		// Use a free buffer if available
+		elem := bp.freeList.Front()
+		bufDesc = elem.Value.(*BufferDescriptor)
+		bp.freeList.Remove(elem)
+	} else {
+		// Evict a page based on policy
+		var evictErr error
+		bufDesc, evictErr = bp.evictPage()
+		if evictErr != nil {
+			return evictErr
+		}
+	}
+
+	// Update buffer descriptor
+	bufDesc.pageID = pageID
+	bufDesc.dirty = true // Mark as dirty since it's a new page
+	bufDesc.pinCount = 1 // Pin the page
+	bufDesc.lastAccess = time.Now()
+	bufDesc.referenced = true
+	bufDesc.useCount = 1
+	copy(bufDesc.data, pageData)
+
+	// Add to appropriate list based on policy
+	var elem *list.Element
+	if bp.policy == LRUPolicy {
+		elem = bp.lruList.PushFront(bufDesc)
+	} else {
+		elem = bp.lruList.PushBack(bufDesc)
+		if bp.clockHand == nil {
+			bp.clockHand = elem
+		}
+	}
+
+	bp.buffers[pageID] = elem
+
+	// Write the new page to disk immediately
+	if err := bp.storageManager.WritePage(pageID, pageData); err != nil {
+		// Clean up on failure
+		delete(bp.buffers, pageID)
+		bp.lruList.Remove(elem)
+		bp.freeList.PushBack(bufDesc)
+		return err
+	}
+
+	// After successful write, the page is no longer dirty
+	bufDesc.dirty = false
+
+	return nil
+}
+
 // GetPage retrieves a page from the buffer pool
 func (bp *BufferPool) GetPage(pageID uint32) (*Page, error) {
 	bp.mu.Lock()
@@ -367,3 +452,4 @@ func (bp *BufferPool) FlushAllPages() error {
 
 	return nil
 }
+

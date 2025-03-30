@@ -1,3 +1,5 @@
+version: '2'
+
 run:
   timeout: 5m
   modules-download-mode: readonly
@@ -29,6 +31,5 @@ linters:
     - asciicheck # checks that your code does not contain non-ASCII identifiers
 
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0

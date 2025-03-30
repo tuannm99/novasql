@@ -14,9 +14,9 @@ type PageHeader struct {
 	FreeEnd        uint32 // Offset to end of free space
 	TotalFreeSpace uint32 // FreeEnd - FreeStart
 	Flags          uint8
-	LSN            uint64 // Log Sequence Number for WAL
-	Checksum       uint32 // CRC32 checksum
-	TransactionID  uint64 // ID of last transaction that modified the page
+	// LSN            uint64 // Log Sequence Number for WAL
+	// Checksum       uint32 // CRC32 checksum
+	// TransactionID  uint64 // ID of last transaction that modified the page
 }
 
 // Page structure to hold data and metadata
@@ -74,19 +74,25 @@ func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
 			FreeEnd:        PageSize,
 			TotalFreeSpace: PageSize - headerSize,
 			Flags:          0,
-			LSN:            0,
-			Checksum:       0,
-			TransactionID:  0,
+			// LSN:            0,
+			// Checksum:       0,
+			// TransactionID:  0,
 		},
 		Data:  make([]byte, PageSize-headerSize),
 		dirty: true,
 	}
 
-	// Save new page to disk
-	err = sm.SavePage(page)
+	// Add the page to the buffer pool
+	err = sm.bufferPool.AddPage(page)
 	if err != nil {
-		return nil, NewStorageError(ErrCodeStorageIO, "Failed to save new page", err)
+		return nil, NewStorageError(ErrCodeStorageIO, "Failed to add new page to buffer pool", err)
 	}
+
+	// Save new page to disk
+	// err = sm.SavePage(page)
+	// if err != nil {
+	// 	return nil, NewStorageError(ErrCodeStorageIO, "Failed to save new page", err)
+	// }
 
 	return page, nil
 }
@@ -102,7 +108,7 @@ func getOffsetCellPointerFromId(id uint32) uint32 {
 }
 
 // AddCell adds a cell to the page and returns its index
-func AddCell(page *Page, cell []byte, txID uint64) (uint32, error) {
+func AddCell(page *Page, cell []byte) (uint32, error) {
 	header := &page.Header
 	cellSize := uint32(len(cell))
 
@@ -131,7 +137,7 @@ func AddCell(page *Page, cell []byte, txID uint64) (uint32, error) {
 	header.FreeEnd -= cellSize
 	header.FreeStart += DefaultCellPointerSize
 	header.TotalFreeSpace = header.FreeEnd - header.FreeStart
-	header.TransactionID = txID
+	// header.TransactionID = txID
 	page.dirty = true
 
 	return getIdFromCellPointerOffset(pointerOffset), nil
@@ -164,7 +170,7 @@ func GetCell(page *Page, index uint32) ([]byte, error) {
 }
 
 // RemoveCell removes a cell from the page
-func RemoveCell(page *Page, index uint32, txID uint64) error {
+func RemoveCell(page *Page, index uint32) error {
 	offset := getOffsetCellPointerFromId(index)
 
 	if offset >= page.Header.FreeStart {
@@ -173,7 +179,7 @@ func RemoveCell(page *Page, index uint32, txID uint64) error {
 
 	header := &page.Header
 	header.Flags |= CanCompact
-	header.TransactionID = txID
+	// header.TransactionID = txID
 	page.dirty = true
 
 	// Mark cell as deleted by setting its location and size to 0
@@ -242,9 +248,9 @@ func Compact(sm *StorageManager, page *Page) error {
 			FreeEnd:        PageSize,
 			TotalFreeSpace: PageSize - DefaultPageHeaderSize,
 			Flags:          0,
-			LSN:            page.Header.LSN,
-			Checksum:       page.Header.Checksum,
-			TransactionID:  page.Header.TransactionID,
+			// LSN:            page.Header.LSN,
+			// Checksum:       page.Header.Checksum,
+			// TransactionID:  page.Header.TransactionID,
 		},
 		Data:  make([]byte, PageSize-DefaultPageHeaderSize),
 		dirty: true,
@@ -254,7 +260,7 @@ func Compact(sm *StorageManager, page *Page) error {
 	for _, ptr := range pointerList.Start {
 		if ptr.Location != 0 && ptr.Size != 0 {
 			cellData := page.Data[ptr.Location-DefaultPageHeaderSize : ptr.Location-DefaultPageHeaderSize+ptr.Size]
-			_, err := AddCell(tempPage, cellData, header.TransactionID)
+			_, err := AddCell(tempPage, cellData)
 			if err != nil {
 				return NewStorageError(ErrCodeStorageIO, "Failed to add cell during compaction", err)
 			}
@@ -325,4 +331,22 @@ func (p *Page) Deserialize(data []byte) error {
 
 	p.dirty = false
 	return nil
+}
+
+// Helper function that must be added to Page struct
+func (p *Page) serializeHeader() ([]byte, error) {
+	headerSize := binary.Size(p.Header)
+	if headerSize < 0 {
+		return nil, NewStorageError(ErrCodeInvalidOperation, "Invalid header size", nil)
+	}
+
+	headerBytes := make([]byte, headerSize)
+	buf := bytes.NewBuffer(headerBytes[:0])
+
+	err := binary.Write(buf, binary.LittleEndian, &p.Header)
+	if err != nil {
+		return nil, NewStorageError(ErrCodeInvalidOperation, "Failed to serialize header", err)
+	}
+
+	return buf.Bytes(), nil
 }
