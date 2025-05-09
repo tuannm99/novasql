@@ -25,7 +25,7 @@ func NewPageDirectory(workDir string) (*PageDirectory, error) {
 
 	// Load from file if it exists
 	if err := pd.Load(); err != nil {
-		return nil, NewStorageError(ErrCodeStorageIO, "Failed to load page directory", err)
+		return nil, NewStorageError("load page directory", err)
 	}
 
 	return pd, nil
@@ -47,7 +47,7 @@ func (pd *PageDirectory) GetPages(tableName string) ([]uint32, error) {
 
 	pages, exists := pd.entries[tableName]
 	if !exists {
-		return nil, NewStorageError(ErrCodeInvalidOperation, fmt.Sprintf("Table %s not found", tableName), nil)
+		return nil, NewStorageError("get pages", fmt.Errorf("table %s not found", tableName))
 	}
 
 	// Return a copy to prevent concurrent modification
@@ -64,7 +64,7 @@ func (pd *PageDirectory) RemovePage(tableName string, pageID uint32) error {
 
 	pages, exists := pd.entries[tableName]
 	if !exists {
-		return NewStorageError(ErrCodeInvalidOperation, fmt.Sprintf("Table %s not found", tableName), nil)
+		return NewStorageError("remove page", fmt.Errorf("table %s not found", tableName))
 	}
 
 	for i, id := range pages {
@@ -74,18 +74,14 @@ func (pd *PageDirectory) RemovePage(tableName string, pageID uint32) error {
 		}
 	}
 
-	return NewStorageError(
-		ErrCodeInvalidOperation,
-		fmt.Sprintf("Page %d not found in table %s", pageID, tableName),
-		nil,
-	)
+	return NewStorageError("remove page", fmt.Errorf("page %d not found in table %s", pageID, tableName))
 }
 
 // Save persists the Page Directory as a binary file
 func (pd *PageDirectory) Save() error {
 	file, err := os.Create(pd.path)
 	if err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to create page directory file", err)
+		return NewStorageError("save page directory", err)
 	}
 	defer func() {
 		_ = file.Close()
@@ -95,7 +91,7 @@ func (pd *PageDirectory) Save() error {
 
 	// Write number of tables
 	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(pd.entries))); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to write table count", err)
+		return NewStorageError("write table count", err)
 	}
 
 	// Write table entries
@@ -103,21 +99,21 @@ func (pd *PageDirectory) Save() error {
 		// Write table name length and name
 		tableNameBytes := []byte(table)
 		if err := binary.Write(&buf, binary.LittleEndian, uint32(len(tableNameBytes))); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to write table name length", err)
+			return NewStorageError("write table name length", err)
 		}
 		if _, err := buf.Write(tableNameBytes); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to write table name", err)
+			return NewStorageError("write table name", err)
 		}
 
 		// Write number of pages
 		if err := binary.Write(&buf, binary.LittleEndian, uint32(len(pages))); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to write page count", err)
+			return NewStorageError("write page count", err)
 		}
 
 		// Write page IDs
 		for _, pageID := range pages {
 			if err := binary.Write(&buf, binary.LittleEndian, pageID); err != nil {
-				return NewStorageError(ErrCodeStorageIO, "Failed to write page ID", err)
+				return NewStorageError("write page ID", err)
 			}
 		}
 	}
@@ -125,7 +121,7 @@ func (pd *PageDirectory) Save() error {
 	// Write buffer to file
 	_, err = file.Write(buf.Bytes())
 	if err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to write page directory to disk", err)
+		return NewStorageError("write page directory to disk", err)
 	}
 
 	return nil
@@ -144,7 +140,7 @@ func (pd *PageDirectory) Load() error {
 
 	stat, err := file.Stat()
 	if err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to get file stats", err)
+		return NewStorageError("get file stats", err)
 	}
 	if stat.Size() == 0 {
 		return nil // Empty file, start fresh
@@ -152,7 +148,7 @@ func (pd *PageDirectory) Load() error {
 
 	data := make([]byte, stat.Size())
 	if _, err := file.Read(data); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to read file data", err)
+		return NewStorageError("read file data", err)
 	}
 
 	buf := bytes.NewReader(data)
@@ -160,7 +156,7 @@ func (pd *PageDirectory) Load() error {
 	// Read number of tables
 	var numTables uint32
 	if err := binary.Read(buf, binary.LittleEndian, &numTables); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to read table count", err)
+		return NewStorageError("read table count", err)
 	}
 
 	pd.entries = make(map[string][]uint32)
@@ -169,27 +165,27 @@ func (pd *PageDirectory) Load() error {
 		// Read table name length
 		var tableNameLen uint32
 		if err := binary.Read(buf, binary.LittleEndian, &tableNameLen); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to read table name length", err)
+			return NewStorageError("read table name length", err)
 		}
 
 		// Read table name
 		tableNameBytes := make([]byte, tableNameLen)
 		if _, err := buf.Read(tableNameBytes); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to read table name", err)
+			return NewStorageError("read table name", err)
 		}
 		tableName := string(tableNameBytes)
 
 		// Read number of pages
 		var numPages uint32
 		if err := binary.Read(buf, binary.LittleEndian, &numPages); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to read page count", err)
+			return NewStorageError("read page count", err)
 		}
 
 		// Read page IDs
 		pages := make([]uint32, numPages)
 		for j := uint32(0); j < numPages; j++ {
 			if err := binary.Read(buf, binary.LittleEndian, &pages[j]); err != nil {
-				return NewStorageError(ErrCodeStorageIO, "Failed to read page ID", err)
+				return NewStorageError("read page ID", err)
 			}
 		}
 

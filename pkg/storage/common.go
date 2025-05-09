@@ -34,28 +34,28 @@ const (
 	Overflow
 )
 
-// Error codes
-const (
-	ErrCodePageNotFound = iota + 1000
-	ErrCodePageFull
-	ErrCodePageCorrupted
-	ErrCodeBufferPoolFull
-	ErrCodeStorageIO
-	ErrCodeInvalidOperation
+// Common errors
+var (
+	ErrPageNotFound     = fmt.Errorf("page not found")
+	ErrPageFull         = fmt.Errorf("page is full")
+	ErrPageCorrupted    = fmt.Errorf("page is corrupted")
+	ErrBufferPoolFull   = fmt.Errorf("buffer pool is full")
+	ErrStorageIO        = fmt.Errorf("storage I/O error")
+	ErrInvalidOperation = fmt.Errorf("invalid operation")
+	ErrNoFreeBuffer     = fmt.Errorf("no free buffer available")
 )
 
 // StorageError represents an error in the storage system
 type StorageError struct {
-	Code    int
-	Message string
-	Err     error
+	Op  string // Operation that failed
+	Err error  // The underlying error
 }
 
 func (e *StorageError) Error() string {
 	if e.Err != nil {
-		return fmt.Sprintf("%s: %v", e.Message, e.Err)
+		return fmt.Sprintf("%s: %v", e.Op, e.Err)
 	}
-	return e.Message
+	return e.Op
 }
 
 func (e *StorageError) Unwrap() error {
@@ -63,10 +63,9 @@ func (e *StorageError) Unwrap() error {
 }
 
 // NewStorageError creates a new storage error
-func NewStorageError(code int, message string, err error) *StorageError {
+func NewStorageError(op string, err error) *StorageError {
 	return &StorageError{
-		Code:    code,
-		Message: message,
-		Err:     err,
+		Op:  op,
+		Err: err,
 	}
 }

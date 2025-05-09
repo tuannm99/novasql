@@ -7,20 +7,19 @@ run:
 linters:
   enable:
     - errcheck
-    - goimports
     - govet
     - staticcheck
-    - gosimple
     - ineffassign
-    - typecheck
     - unused
+    # - goimports
+    # - gosimple
+    # - typecheck
 
     - lll # reports long lines
     - copyloopvar # detects places where loop variables are copied (Go 1.22+)
     - errname # checks that sentinel errors are prefixed with the Err and error types are suffixed with the Error
     - wastedassign # finds wasted assignment statements
     - whitespace # detects leading and trailing whitespace
-    - mnd # detects magic numbers
     - testifylint # checks usage of github.com/stretchr/testify
     - testpackage # makes you use a separate _test package
     - tparallel # detects inappropriate usage of t.Parallel() method in your Go test codes

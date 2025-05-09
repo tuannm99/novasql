@@ -14,7 +14,7 @@ type Tuple struct {
 // InsertTuple inserts a tuple into the page
 func (p *Page) InsertTuple(tuple Tuple) error {
 	if p.Header.Type != Slotted {
-		return NewStorageError(ErrCodeInvalidOperation, "Cannot insert tuple into non-slotted page", nil)
+		return NewStorageError("insert tuple", fmt.Errorf("cannot insert tuple into non-slotted page"))
 	}
 
 	// Serialize the tuple data
@@ -35,7 +35,7 @@ func (p *Page) InsertTuple(tuple Tuple) error {
 // FetchTuple retrieves a tuple by ID
 func (p *Page) FetchTuple(tupleID uint64) (*Tuple, error) {
 	if p.Header.Type != Slotted {
-		return nil, NewStorageError(ErrCodeInvalidOperation, "Cannot fetch tuple from non-slotted page", nil)
+		return nil, NewStorageError("fetch tuple", fmt.Errorf("cannot fetch tuple from non-slotted page"))
 	}
 
 	// Get the pointer list
@@ -68,5 +68,5 @@ func (p *Page) FetchTuple(tupleID uint64) (*Tuple, error) {
 		}
 	}
 
-	return nil, NewStorageError(ErrCodeInvalidOperation, fmt.Sprintf("Tuple with ID %d not found", tupleID), nil)
+	return nil, NewStorageError("fetch tuple", fmt.Errorf("tuple with ID %d not found", tupleID))
 }

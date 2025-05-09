@@ -19,14 +19,14 @@ type StorageManager struct {
 	freeListMutex sync.RWMutex        // Mutex for free list access
 	maxPageID     uint32              // Highest page ID allocated
 	metadataFile  string              // Path to database metadata file
-	bufferPool    *BufferPool         // Buffer pool for caching pages
+	bufferPool    *PageBufferPool     // Buffer pool for caching pages
 }
 
 // NewStorageManager initializes storage in a directory
 func NewStorageManager(dir string) (*StorageManager, error) {
 	// Create the directory if it doesn't exist
 	if err := os.MkdirAll(dir, FileMode0755); err != nil {
-		return nil, NewStorageError(ErrCodeStorageIO, "Failed to create directory", err)
+		return nil, NewStorageError("create directory", err)
 	}
 
 	sm := &StorageManager{
@@ -46,16 +46,16 @@ func NewStorageManager(dir string) (*StorageManager, error) {
 	// Load metadata if it exists
 	if err := sm.loadMetadata(); err != nil {
 		if !os.IsNotExist(err) {
-			return nil, NewStorageError(ErrCodeStorageIO, "Failed to load metadata", err)
+			return nil, NewStorageError("load metadata", err)
 		}
 		// Create initial metadata if file doesn't exist
 		if err := sm.saveMetadata(); err != nil {
-			return nil, NewStorageError(ErrCodeStorageIO, "Failed to save initial metadata", err)
+			return nil, NewStorageError("save initial metadata", err)
 		}
 	}
 
 	// Initialize buffer pool with the storage manager
-	sm.bufferPool = NewBufferPool(PageSize, 1000, sm, LRUPolicy)
+	sm.bufferPool = NewPageBufferPool(PageSize, 1000, sm, LRUPolicy)
 
 	return sm, nil
 }
@@ -90,7 +90,7 @@ func (sm *StorageManager) getSegmentFile(pageID uint32) (*os.File, error) {
 	segmentPath := sm.GetSegmentPath(pageID)
 	file, err := os.OpenFile(segmentPath, os.O_RDWR|os.O_CREATE, FileMode0664)
 	if err != nil {
-		return nil, NewStorageError(ErrCodeStorageIO, "Failed to open segment file", err)
+		return nil, NewStorageError("open segment file", err)
 	}
 
 	sm.segmentFiles[segmentID] = file
@@ -100,8 +100,7 @@ func (sm *StorageManager) getSegmentFile(pageID uint32) (*os.File, error) {
 // WritePage writes a page to its corresponding segment file
 func (sm *StorageManager) WritePage(pageID uint32, data []byte) error {
 	if len(data) != PageSize {
-		return NewStorageError(ErrCodeInvalidOperation,
-			fmt.Sprintf("Page must be exactly %d bytes", PageSize), nil)
+		return NewStorageError("write page", fmt.Errorf("page must be exactly %d bytes", PageSize))
 	}
 
 	file, err := sm.getSegmentFile(pageID)
@@ -117,12 +116,12 @@ func (sm *StorageManager) WritePage(pageID uint32, data []byte) error {
 
 	_, err = file.Seek(offset, io.SeekStart)
 	if err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Seek failed", err)
+		return NewStorageError("seek", err)
 	}
 
 	_, err = file.Write(data)
 	if err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Write failed", err)
+		return NewStorageError("write", err)
 	}
 
 	// Update page count if necessary
@@ -131,7 +130,7 @@ func (sm *StorageManager) WritePage(pageID uint32, data []byte) error {
 		sm.maxPageID = pageID
 		err = sm.saveMetadata()
 		if err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to update metadata", err)
+			return NewStorageError("update metadata", err)
 		}
 	}
 
@@ -153,17 +152,16 @@ func (sm *StorageManager) ReadPage(pageID uint32) ([]byte, error) {
 
 	_, err = file.Seek(offset, io.SeekStart)
 	if err != nil {
-		return nil, NewStorageError(ErrCodeStorageIO, "Seek failed", err)
+		return nil, NewStorageError("seek", err)
 	}
 
 	n, err := file.Read(data)
 	if err != nil && err != io.EOF {
-		return nil, NewStorageError(ErrCodeStorageIO, "Read failed", err)
+		return nil, NewStorageError("read", err)
 	}
 
 	if n != PageSize && pageID < sm.pageCount {
-		return nil, NewStorageError(ErrCodePageCorrupted,
-			fmt.Sprintf("Incomplete page read: got %d bytes, expected %d", n, PageSize), nil)
+		return nil, NewStorageError("read page", fmt.Errorf("incomplete page read: got %d bytes, expected %d", n, PageSize))
 	}
 
 	return data, nil
@@ -193,7 +191,7 @@ func (sm *StorageManager) AllocatePage(pageType PageType) (*Page, error) {
 
 		// Save metadata to persist free list changes
 		if err := sm.saveMetadata(); err != nil {
-			return nil, NewStorageError(ErrCodeStorageIO, "Failed to save metadata", err)
+			return nil, NewStorageError("save metadata", err)
 		}
 
 		// Create a new page with the allocated ID
@@ -207,7 +205,7 @@ func (sm *StorageManager) AllocatePage(pageType PageType) (*Page, error) {
 
 	// Save metadata to persist changes
 	if err := sm.saveMetadata(); err != nil {
-		return nil, NewStorageError(ErrCodeStorageIO, "Failed to save metadata", err)
+		return nil, NewStorageError("save metadata", err)
 	}
 
 	// Create a new page with the allocated ID
@@ -237,13 +235,13 @@ func (sm *StorageManager) loadMetadata() error {
 	// Read basic metadata
 	var maxPageID, pageCount, numFreeLists uint32
 	if err := binary.Read(file, binary.LittleEndian, &maxPageID); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to read maxPageID", err)
+		return NewStorageError("read maxPageID", err)
 	}
 	if err := binary.Read(file, binary.LittleEndian, &pageCount); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to read pageCount", err)
+		return NewStorageError("read pageCount", err)
 	}
 	if err := binary.Read(file, binary.LittleEndian, &numFreeLists); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to read numFreeLists", err)
+		return NewStorageError("read numFreeLists", err)
 	}
 
 	sm.maxPageID = maxPageID
@@ -253,17 +251,17 @@ func (sm *StorageManager) loadMetadata() error {
 	for i := uint32(0); i < numFreeLists; i++ {
 		var pageType, count uint32
 		if err := binary.Read(file, binary.LittleEndian, &pageType); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to read pageType", err)
+			return NewStorageError("read pageType", err)
 		}
 		if err := binary.Read(file, binary.LittleEndian, &count); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to read free list count", err)
+			return NewStorageError("read free list count", err)
 		}
 
 		freeList := make([]uint32, count)
 		for j := uint32(0); j < count; j++ {
 			var pageID uint32
 			if err := binary.Read(file, binary.LittleEndian, &pageID); err != nil {
-				return NewStorageError(ErrCodeStorageIO, "Failed to read free page ID", err)
+				return NewStorageError("read free page ID", err)
 			}
 			freeList[j] = pageID
 		}
@@ -278,37 +276,37 @@ func (sm *StorageManager) loadMetadata() error {
 func (sm *StorageManager) saveMetadata() error {
 	file, err := os.OpenFile(sm.metadataFile, os.O_RDWR|os.O_CREATE|os.O_TRUNC, FileMode0664)
 	if err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to open metadata file", err)
+		return NewStorageError("open metadata file", err)
 	}
 	defer file.Close()
 
 	// Write basic metadata
 	if err := binary.Write(file, binary.LittleEndian, sm.maxPageID); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to write maxPageID", err)
+		return NewStorageError("write maxPageID", err)
 	}
 	if err := binary.Write(file, binary.LittleEndian, sm.pageCount); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to write pageCount", err)
+		return NewStorageError("write pageCount", err)
 	}
 
 	// Write free lists
 	numFreeLists := uint32(len(sm.freeLists))
 	if err := binary.Write(file, binary.LittleEndian, numFreeLists); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to write numFreeLists", err)
+		return NewStorageError("write numFreeLists", err)
 	}
 
 	for pageType, freeList := range sm.freeLists {
 		if err := binary.Write(file, binary.LittleEndian, pageType); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to write pageType", err)
+			return NewStorageError("write pageType", err)
 		}
 
 		count := uint32(len(freeList))
 		if err := binary.Write(file, binary.LittleEndian, count); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to write free list count", err)
+			return NewStorageError("write free list count", err)
 		}
 
 		for _, pageID := range freeList {
 			if err := binary.Write(file, binary.LittleEndian, pageID); err != nil {
-				return NewStorageError(ErrCodeStorageIO, "Failed to write free page ID", err)
+				return NewStorageError("write free page ID", err)
 			}
 		}
 	}
@@ -328,7 +326,7 @@ func (sm *StorageManager) Close() error {
 
 	for _, file := range sm.segmentFiles {
 		if err := file.Close(); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to close segment file", err)
+			return NewStorageError("close segment file", err)
 		}
 	}
 
@@ -376,7 +374,7 @@ func (sm *StorageManager) FlushAll() error {
 
 	for _, file := range sm.segmentFiles {
 		if err := file.Sync(); err != nil {
-			return NewStorageError(ErrCodeStorageIO, "Failed to sync segment file", err)
+			return NewStorageError("sync segment file", err)
 		}
 	}
 

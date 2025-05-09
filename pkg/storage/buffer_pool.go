@@ -23,14 +23,22 @@ type BufferDescriptor struct {
 	pinCount   int
 	lastAccess time.Time
 	data       []byte
-	// For Clock algorithm
-	referenced bool
-	// For LFU algorithm
-	useCount int
+	referenced bool // For Clock algorithm
+	useCount   int  // For LFU algorithm
 }
 
-// BufferPool manages a pool of buffers for database pages
-type BufferPool struct {
+// BufferPoolStats tracks buffer pool statistics
+type BufferPoolStats struct {
+	Hits       int64
+	Misses     int64
+	Evictions  int64
+	DiskReads  int64
+	DiskWrites int64
+	LastReset  time.Time
+}
+
+// PageBufferPool manages a pool of buffers for database pages
+type PageBufferPool struct {
 	buffers        map[uint32]*list.Element // Maps pageID to buffer position
 	lruList        *list.List               // For LRU eviction policy
 	freeList       *list.List               // List of free buffer slots
@@ -39,12 +47,13 @@ type BufferPool struct {
 	storageManager *StorageManager          // Storage manager for I/O
 	policy         EvictionPolicy           // Eviction policy
 	clockHand      *list.Element            // For Clock algorithm
-	mu             sync.Mutex               // Mutex for thread safety
+	mu             sync.RWMutex             // Mutex for thread safety
+	stats          *BufferPoolStats         // Statistics
 }
 
-// NewBufferPool creates a new buffer pool
-func NewBufferPool(bufferSize, maxBuffers int, sm *StorageManager, policy EvictionPolicy) *BufferPool {
-	pool := &BufferPool{
+// NewPageBufferPool creates a new buffer pool
+func NewPageBufferPool(bufferSize, maxBuffers int, sm *StorageManager, policy EvictionPolicy) *PageBufferPool {
+	pool := &PageBufferPool{
 		buffers:        make(map[uint32]*list.Element),
 		lruList:        list.New(),
 		freeList:       list.New(),
@@ -52,18 +61,15 @@ func NewBufferPool(bufferSize, maxBuffers int, sm *StorageManager, policy Evicti
 		maxBuffers:     maxBuffers,
 		storageManager: sm,
 		policy:         policy,
+		stats: &BufferPoolStats{
+			LastReset: time.Now(),
+		},
 	}
 
 	// Initialize free buffer slots
 	for i := 0; i < maxBuffers; i++ {
 		desc := &BufferDescriptor{
-			pageID:     0,
-			dirty:      false,
-			pinCount:   0,
-			lastAccess: time.Now(),
-			data:       make([]byte, bufferSize),
-			referenced: false,
-			useCount:   0,
+			data: make([]byte, bufferSize),
 		}
 		pool.freeList.PushBack(desc)
 	}
@@ -73,56 +79,41 @@ func NewBufferPool(bufferSize, maxBuffers int, sm *StorageManager, policy Evicti
 
 // AddPage adds a new page to the buffer pool
 // This is specifically for pages that are newly created and don't yet exist on disk
-func (bp *BufferPool) AddPage(page *Page) error {
+func (bp *PageBufferPool) AddPage(page *Page) error {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
-	pageID := page.ID
-
-	// Check if page already exists in the buffer pool
-	if _, found := bp.buffers[pageID]; found {
-		return NewStorageError(
-			ErrCodeInvalidOperation,
-			fmt.Sprintf("Page %d already exists in buffer pool", pageID),
-			nil,
-		)
+	// Check if page already exists
+	if _, exists := bp.buffers[page.ID]; exists {
+		return NewStorageError("add page", fmt.Errorf("page %d already exists in buffer pool", page.ID))
 	}
 
-	// Serialize the page
-	pageData := make([]byte, bp.bufferSize)
-
-	// Copy header to page data
-	headerBytes, err := page.serializeHeader()
-	if err != nil {
-		return NewStorageError(ErrCodeInvalidOperation, "Failed to serialize page header", err)
-	}
-	copy(pageData, headerBytes)
-
-	// Copy page data
-	if len(page.Data) > 0 {
-		copy(pageData[len(headerBytes):], page.Data)
-	}
-
-	// Allocate a buffer
+	// Allocate buffer
 	var bufDesc *BufferDescriptor
 	if bp.freeList.Len() > 0 {
-		// Use a free buffer if available
 		elem := bp.freeList.Front()
 		bufDesc = elem.Value.(*BufferDescriptor)
 		bp.freeList.Remove(elem)
 	} else {
-		// Evict a page based on policy
-		var evictErr error
-		bufDesc, evictErr = bp.evictPage()
-		if evictErr != nil {
-			return evictErr
+		var err error
+		bufDesc, err = bp.evictPage()
+		if err != nil {
+			return err
 		}
+		bp.stats.Evictions++
+	}
+
+	// Serialize page data
+	pageData, err := page.Serialize()
+	if err != nil {
+		bp.freeList.PushBack(bufDesc)
+		return NewStorageError("serialize page", err)
 	}
 
 	// Update buffer descriptor
-	bufDesc.pageID = pageID
-	bufDesc.dirty = true // Mark as dirty since it's a new page
-	bufDesc.pinCount = 1 // Pin the page
+	bufDesc.pageID = page.ID
+	bufDesc.dirty = true // New pages are always dirty
+	bufDesc.pinCount = 1
 	bufDesc.lastAccess = time.Now()
 	bufDesc.referenced = true
 	bufDesc.useCount = 1
@@ -139,30 +130,18 @@ func (bp *BufferPool) AddPage(page *Page) error {
 		}
 	}
 
-	bp.buffers[pageID] = elem
-
-	// Write the new page to disk immediately
-	if err := bp.storageManager.WritePage(pageID, pageData); err != nil {
-		// Clean up on failure
-		delete(bp.buffers, pageID)
-		bp.lruList.Remove(elem)
-		bp.freeList.PushBack(bufDesc)
-		return err
-	}
-
-	// After successful write, the page is no longer dirty
-	bufDesc.dirty = false
-
+	bp.buffers[page.ID] = elem
 	return nil
 }
 
 // GetPage retrieves a page from the buffer pool
-func (bp *BufferPool) GetPage(pageID uint32) (*Page, error) {
+func (bp *PageBufferPool) GetPage(pageID uint32) (*Page, error) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
 	// Check if page is already in memory
 	if elem, found := bp.buffers[pageID]; found {
+		bp.stats.Hits++
 		desc := elem.Value.(*BufferDescriptor)
 		desc.pinCount++
 		desc.lastAccess = time.Now()
@@ -176,10 +155,13 @@ func (bp *BufferPool) GetPage(pageID uint32) (*Page, error) {
 
 		page := &Page{ID: pageID}
 		if err := page.Deserialize(desc.data); err != nil {
-			return nil, err
+			return nil, NewStorageError("deserialize page", err)
 		}
 		return page, nil
 	}
+
+	bp.stats.Misses++
+	bp.stats.DiskReads++
 
 	// Allocate buffer
 	var bufDesc *BufferDescriptor
@@ -188,19 +170,19 @@ func (bp *BufferPool) GetPage(pageID uint32) (*Page, error) {
 		bufDesc = elem.Value.(*BufferDescriptor)
 		bp.freeList.Remove(elem)
 	} else {
-		// Evict a page based on policy
 		var err error
 		bufDesc, err = bp.evictPage()
 		if err != nil {
 			return nil, err
 		}
+		bp.stats.Evictions++
 	}
 
 	// Load page from storage
 	pageData, err := bp.storageManager.ReadPage(pageID)
 	if err != nil {
-		bp.freeList.PushBack(bufDesc) // Return buffer if read fails
-		return nil, err
+		bp.freeList.PushBack(bufDesc)
+		return nil, NewStorageError("read page", err)
 	}
 
 	// Update buffer descriptor
@@ -228,16 +210,96 @@ func (bp *BufferPool) GetPage(pageID uint32) (*Page, error) {
 	// Deserialize into a Page object
 	page := &Page{ID: pageID}
 	if err := page.Deserialize(pageData); err != nil {
-		return nil, err
+		return nil, NewStorageError("deserialize page", err)
 	}
 
 	return page, nil
 }
 
+// ReleasePage decreases the pin count and marks the page as dirty if modified
+func (bp *PageBufferPool) ReleasePage(pageID uint32, dirty bool) error {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
+	elem, found := bp.buffers[pageID]
+	if !found {
+		return NewStorageError("release page", fmt.Errorf("page %d not in buffer pool", pageID))
+	}
+
+	desc := elem.Value.(*BufferDescriptor)
+	if desc.pinCount <= 0 {
+		return NewStorageError("release page", fmt.Errorf("page %d is not pinned", pageID))
+	}
+
+	desc.pinCount--
+	if dirty {
+		desc.dirty = true
+	}
+
+	return nil
+}
+
+// FlushPage writes a specific page back to disk if it's dirty
+func (bp *PageBufferPool) FlushPage(pageID uint32) error {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
+	elem, found := bp.buffers[pageID]
+	if !found {
+		return nil // Page not in buffer pool, nothing to flush
+	}
+
+	desc := elem.Value.(*BufferDescriptor)
+	if desc.dirty {
+		bp.stats.DiskWrites++
+		if err := bp.storageManager.WritePage(pageID, desc.data); err != nil {
+			return NewStorageError("flush page", err)
+		}
+		desc.dirty = false
+	}
+
+	return nil
+}
+
+// FlushAllPages writes all dirty pages back to disk
+func (bp *PageBufferPool) FlushAllPages() error {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
+	for pageID, elem := range bp.buffers {
+		desc := elem.Value.(*BufferDescriptor)
+		if desc.dirty {
+			bp.stats.DiskWrites++
+			if err := bp.storageManager.WritePage(pageID, desc.data); err != nil {
+				return NewStorageError("flush all pages", err)
+			}
+			desc.dirty = false
+		}
+	}
+
+	return nil
+}
+
+// GetStats returns the current buffer pool statistics
+func (bp *PageBufferPool) GetStats() *BufferPoolStats {
+	bp.mu.RLock()
+	defer bp.mu.RUnlock()
+	return bp.stats
+}
+
+// ResetStats resets the buffer pool statistics
+func (bp *PageBufferPool) ResetStats() {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+	bp.stats = &BufferPoolStats{
+		LastReset: time.Now(),
+	}
+}
+
 // evictPage selects a page for eviction based on the chosen policy
-func (bp *BufferPool) evictPage() (*BufferDescriptor, error) {
+func (bp *PageBufferPool) evictPage() (*BufferDescriptor, error) {
 	if bp.lruList.Len() == 0 {
-		return nil, NewStorageError(ErrCodeBufferPoolFull, "All pages are pinned, cannot evict", nil)
+		return nil, NewStorageError("evict page", ErrBufferPoolFull)
 	}
 
 	switch bp.policy {
@@ -253,109 +315,80 @@ func (bp *BufferPool) evictPage() (*BufferDescriptor, error) {
 }
 
 // evictLRU implements the Least Recently Used eviction policy
-func (bp *BufferPool) evictLRU() (*BufferDescriptor, error) {
-	// Start from the back of the LRU list
+func (bp *PageBufferPool) evictLRU() (*BufferDescriptor, error) {
 	for e := bp.lruList.Back(); e != nil; e = e.Prev() {
 		desc := e.Value.(*BufferDescriptor)
 		if desc.pinCount == 0 {
-			// Write to disk if dirty
 			if desc.dirty {
+				bp.stats.DiskWrites++
 				if err := bp.storageManager.WritePage(desc.pageID, desc.data); err != nil {
-					return nil, err
+					return nil, NewStorageError("evict LRU", err)
 				}
-				desc.dirty = false
 			}
-
-			// Remove from map and list
-			delete(bp.buffers, desc.pageID)
 			bp.lruList.Remove(e)
-
-			// Reset descriptor
+			delete(bp.buffers, desc.pageID)
 			desc.pageID = 0
+			desc.dirty = false
 			desc.pinCount = 0
 			desc.referenced = false
 			desc.useCount = 0
-
 			return desc, nil
 		}
 	}
-
-	return nil, NewStorageError(ErrCodeBufferPoolFull, "All pages are pinned, cannot evict", nil)
+	return nil, NewStorageError("evict LRU", ErrNoFreeBuffer)
 }
 
 // evictClock implements the Clock (second-chance) eviction algorithm
-func (bp *BufferPool) evictClock() (*BufferDescriptor, error) {
+func (bp *PageBufferPool) evictClock() (*BufferDescriptor, error) {
 	if bp.clockHand == nil {
 		if bp.lruList.Len() == 0 {
-			return nil, NewStorageError(ErrCodeBufferPoolFull, "Buffer pool is empty", nil)
+			return nil, NewStorageError("evict clock", ErrBufferPoolFull)
 		}
 		bp.clockHand = bp.lruList.Front()
 	}
 
-	// Do multiple passes until we find a victim
-	startingPoint := bp.clockHand
+	startHand := bp.clockHand
 	for {
 		desc := bp.clockHand.Value.(*BufferDescriptor)
-
-		// Move the clock hand
-		if bp.clockHand.Next() == nil {
-			bp.clockHand = bp.lruList.Front()
-		} else {
-			bp.clockHand = bp.clockHand.Next()
-		}
-
-		// Skip pinned pages
-		if desc.pinCount > 0 {
-			continue
-		}
-
-		// If referenced, give a second chance
-		if desc.referenced {
-			desc.referenced = false
-			continue
-		}
-
-		// This page is our victim
-		if desc.dirty {
-			if err := bp.storageManager.WritePage(desc.pageID, desc.data); err != nil {
-				return nil, err
+		if desc.pinCount == 0 {
+			if !desc.referenced {
+				if desc.dirty {
+					bp.stats.DiskWrites++
+					if err := bp.storageManager.WritePage(desc.pageID, desc.data); err != nil {
+						return nil, NewStorageError("evict clock", err)
+					}
+				}
+				delete(bp.buffers, desc.pageID)
+				nextHand := bp.clockHand.Next()
+				if nextHand == nil {
+					nextHand = bp.lruList.Front()
+				}
+				bp.lruList.Remove(bp.clockHand)
+				bp.clockHand = nextHand
+				desc.pageID = 0
+				desc.dirty = false
+				desc.pinCount = 0
+				desc.referenced = false
+				desc.useCount = 0
+				return desc, nil
 			}
-			desc.dirty = false
+			desc.referenced = false
 		}
-
-		// Remove from map
-		delete(bp.buffers, desc.pageID)
-
-		// Save the element to remove later
-		victimElem := bp.clockHand.Prev()
-		if victimElem == nil {
-			victimElem = bp.lruList.Back()
+		bp.clockHand = bp.clockHand.Next()
+		if bp.clockHand == nil {
+			bp.clockHand = bp.lruList.Front()
 		}
-
-		// Reset descriptor
-		desc.pageID = 0
-		desc.pinCount = 0
-		desc.referenced = false
-		desc.useCount = 0
-
-		// Remove from list
-		bp.lruList.Remove(victimElem)
-
-		return desc, nil
-
-		// If we made a full loop and found no victims
-		if bp.clockHand == startingPoint {
-			return nil, NewStorageError(ErrCodeBufferPoolFull, "All pages are pinned, cannot evict", nil)
+		if bp.clockHand == startHand {
+			return nil, NewStorageError("evict clock", ErrNoFreeBuffer)
 		}
 	}
 }
 
 // evictLFU implements the Least Frequently Used eviction policy
-func (bp *BufferPool) evictLFU() (*BufferDescriptor, error) {
+func (bp *PageBufferPool) evictLFU() (*BufferDescriptor, error) {
 	var minUseCount int = -1
 	var victimElem *list.Element
 
-	// Find the least frequently used unpinned page
 	for e := bp.lruList.Front(); e != nil; e = e.Next() {
 		desc := e.Value.(*BufferDescriptor)
 		if desc.pinCount == 0 && (minUseCount == -1 || desc.useCount < minUseCount) {
@@ -365,91 +398,22 @@ func (bp *BufferPool) evictLFU() (*BufferDescriptor, error) {
 	}
 
 	if victimElem == nil {
-		return nil, NewStorageError(ErrCodeBufferPoolFull, "All pages are pinned, cannot evict", nil)
+		return nil, NewStorageError("evict LFU", ErrNoFreeBuffer)
 	}
 
 	desc := victimElem.Value.(*BufferDescriptor)
-
-	// Write to disk if dirty
 	if desc.dirty {
+		bp.stats.DiskWrites++
 		if err := bp.storageManager.WritePage(desc.pageID, desc.data); err != nil {
-			return nil, err
+			return nil, NewStorageError("evict LFU", err)
 		}
-		desc.dirty = false
 	}
-
-	// Remove from map and list
-	delete(bp.buffers, desc.pageID)
 	bp.lruList.Remove(victimElem)
-
-	// Reset descriptor
+	delete(bp.buffers, desc.pageID)
 	desc.pageID = 0
+	desc.dirty = false
 	desc.pinCount = 0
 	desc.referenced = false
 	desc.useCount = 0
-
 	return desc, nil
 }
-
-// ReleasePage decreases the pin count and marks the page as dirty if modified
-func (bp *BufferPool) ReleasePage(pageID uint32, dirty bool) error {
-	bp.mu.Lock()
-	defer bp.mu.Unlock()
-
-	elem, found := bp.buffers[pageID]
-	if !found {
-		return NewStorageError(ErrCodeInvalidOperation, fmt.Sprintf("Page %d not in buffer pool", pageID), nil)
-	}
-
-	desc := elem.Value.(*BufferDescriptor)
-	if desc.pinCount <= 0 {
-		return NewStorageError(ErrCodeInvalidOperation, fmt.Sprintf("Page %d is not pinned", pageID), nil)
-	}
-
-	desc.pinCount--
-	if dirty {
-		desc.dirty = true
-	}
-
-	return nil
-}
-
-// FlushPage writes a specific page back to disk if it's dirty
-func (bp *BufferPool) FlushPage(pageID uint32) error {
-	bp.mu.Lock()
-	defer bp.mu.Unlock()
-
-	elem, found := bp.buffers[pageID]
-	if !found {
-		return nil // Page not in buffer pool, nothing to flush
-	}
-
-	desc := elem.Value.(*BufferDescriptor)
-	if desc.dirty {
-		if err := bp.storageManager.WritePage(pageID, desc.data); err != nil {
-			return err
-		}
-		desc.dirty = false
-	}
-
-	return nil
-}
-
-// FlushAllPages writes all dirty pages back to disk
-func (bp *BufferPool) FlushAllPages() error {
-	bp.mu.Lock()
-	defer bp.mu.Unlock()
-
-	for pageID, elem := range bp.buffers {
-		desc := elem.Value.(*BufferDescriptor)
-		if desc.dirty {
-			if err := bp.storageManager.WritePage(pageID, desc.data); err != nil {
-				return err
-			}
-			desc.dirty = false
-		}
-	}
-
-	return nil
-}
-

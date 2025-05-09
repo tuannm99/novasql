@@ -3,6 +3,8 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"os"
 	"sync"
 )
 
@@ -31,23 +33,154 @@ type BTreeNode struct {
 	tree     *BPlusTree
 }
 
+// BufferPool manages a cache of pages in memory
+type BufferPool struct {
+	pool     map[uint32]*Page
+	capacity int
+	mu       sync.RWMutex
+}
+
+// NewBufferPool creates a new buffer pool with the specified capacity
+func NewBufferPool(capacity int) *BufferPool {
+	return &BufferPool{
+		pool:     make(map[uint32]*Page),
+		capacity: capacity,
+	}
+}
+
+// Get retrieves a page from the buffer pool
+func (bp *BufferPool) Get(pageID uint32) (*Page, bool) {
+	bp.mu.RLock()
+	defer bp.mu.RUnlock()
+	page, exists := bp.pool[pageID]
+	return page, exists
+}
+
+// Put adds a page to the buffer pool
+func (bp *BufferPool) Put(page *Page) {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
+
+	// If pool is full, evict least recently used page
+	if len(bp.pool) >= bp.capacity {
+		// Simple LRU implementation - could be improved
+		var oldestPageID uint32
+		for id, p := range bp.pool {
+			// Since Page doesn't have lastAccess, we'll use a simple counter
+			// This is a temporary solution until we add proper access tracking
+			if p.ID < oldestPageID {
+				oldestPageID = id
+			}
+		}
+		delete(bp.pool, oldestPageID)
+	}
+
+	bp.pool[page.ID] = page
+}
+
+// WALRecord represents a write-ahead log record
+type WALRecord struct {
+	LSN        uint64 // Log Sequence Number
+	PageID     uint32
+	Operation  byte   // 'I' for insert, 'D' for delete, 'U' for update
+	BeforeData []byte // Data before the operation
+	AfterData  []byte // Data after the operation
+}
+
+// WALManager manages the write-ahead log
+type WALManager struct {
+	file     *os.File
+	mu       sync.Mutex
+	lsn      uint64
+	pageSize int
+}
+
+// NewWALManager creates a new WAL manager
+func NewWALManager(filename string, pageSize int) (*WALManager, error) {
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	return &WALManager{
+		file:     file,
+		pageSize: pageSize,
+	}, nil
+}
+
+// Log records a WAL record
+func (wm *WALManager) Log(record *WALRecord) error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	// Assign LSN
+	record.LSN = wm.lsn
+	wm.lsn++
+
+	// Serialize record
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.LittleEndian, record.LSN); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, record.PageID); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, record.Operation); err != nil {
+		return err
+	}
+
+	// Write data lengths
+	if err := binary.Write(buf, binary.LittleEndian, uint32(len(record.BeforeData))); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, uint32(len(record.AfterData))); err != nil {
+		return err
+	}
+
+	// Write data
+	if _, err := buf.Write(record.BeforeData); err != nil {
+		return err
+	}
+	if _, err := buf.Write(record.AfterData); err != nil {
+		return err
+	}
+
+	// Write to WAL file
+	if _, err := wm.file.Write(buf.Bytes()); err != nil {
+		return err
+	}
+
+	// Ensure data is written to disk
+	return wm.file.Sync()
+}
+
 // BPlusTree represents a B+ tree index
 type BPlusTree struct {
 	rootPageID     uint32
 	order          int
 	storageManager *StorageManager
-	mu             sync.RWMutex // Concurrency control
+	bufferPool     *BufferPool
+	walManager     *WALManager
+	mu             sync.RWMutex
 }
 
 // NewBPlusTree creates a new B+ tree with the specified order
 func NewBPlusTree(order int, sm *StorageManager) (*BPlusTree, error) {
+	// Create WAL manager
+	walManager, err := NewWALManager("bplustree.wal", PageSize)
+	if err != nil {
+		return nil, err
+	}
+
 	tree := &BPlusTree{
 		order:          order,
 		storageManager: sm,
+		bufferPool:     NewBufferPool(1000),
+		walManager:     walManager,
 	}
 
 	// Create root node
-	rootNode, err := tree.createNode(true) // Start with a leaf node
+	rootNode, err := tree.createNode(true)
 	if err != nil {
 		return nil, err
 	}
@@ -97,16 +230,29 @@ func (bpt *BPlusTree) createNode(isLeaf bool) (*BTreeNode, error) {
 	return node, nil
 }
 
-// loadNode loads a node from disk
+// loadNode loads a node from disk or buffer pool
 func (bpt *BPlusTree) loadNode(pageID uint32) (*BTreeNode, error) {
+	// Try to get from buffer pool first
+	if page, exists := bpt.bufferPool.Get(pageID); exists {
+		return bpt.deserializeNode(page)
+	}
+
+	// Load from disk if not in buffer pool
 	page, err := bpt.storageManager.LoadPage(pageID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Deserialize node from page
+	// Add to buffer pool
+	bpt.bufferPool.Put(page)
+
+	return bpt.deserializeNode(page)
+}
+
+// deserializeNode deserializes a page into a BTreeNode
+func (bpt *BPlusTree) deserializeNode(page *Page) (*BTreeNode, error) {
 	node := &BTreeNode{
-		pageID: pageID,
+		pageID: page.ID,
 		tree:   bpt,
 	}
 
@@ -117,7 +263,7 @@ func (bpt *BPlusTree) loadNode(pageID uint32) (*BTreeNode, error) {
 	// Deserialize header
 	headerBuf := bytes.NewReader(headerData)
 	if err := binary.Read(headerBuf, binary.LittleEndian, &node.header); err != nil {
-		return nil, NewStorageError(ErrCodePageCorrupted, "Failed to deserialize B+Tree node header", err)
+		return nil, NewStorageError("deserialize node header", err)
 	}
 
 	// Read key count
@@ -167,7 +313,7 @@ func (bpt *BPlusTree) loadNode(pageID uint32) (*BTreeNode, error) {
 	return node, nil
 }
 
-// saveNode saves a node to disk
+// saveNode saves a node to disk with WAL logging
 func (bpt *BPlusTree) saveNode(node *BTreeNode) error {
 	if !node.dirty {
 		return nil
@@ -179,13 +325,20 @@ func (bpt *BPlusTree) saveNode(node *BTreeNode) error {
 		return err
 	}
 
+	// Create WAL record
+	record := &WALRecord{
+		PageID:     node.pageID,
+		Operation:  'U',
+		BeforeData: page.Data,
+	}
+
 	// Update node header
 	node.header.KeyCount = uint16(len(node.keys))
 
 	// Serialize header
 	headerBuf := new(bytes.Buffer)
 	if err := binary.Write(headerBuf, binary.LittleEndian, node.header); err != nil {
-		return NewStorageError(ErrCodeStorageIO, "Failed to serialize B+Tree node header", err)
+		return NewStorageError("serialize node header", err)
 	}
 
 	// Copy header to page
@@ -223,6 +376,14 @@ func (bpt *BPlusTree) saveNode(node *BTreeNode) error {
 			binary.LittleEndian.PutUint32(page.Data[offset:offset+4], childID)
 			offset += 4
 		}
+	}
+
+	// Set after data for WAL record
+	record.AfterData = page.Data
+
+	// Log the change
+	if err := bpt.walManager.Log(record); err != nil {
+		return err
 	}
 
 	// Mark page as dirty and save
@@ -425,7 +586,7 @@ func (bpt *BPlusTree) Search(key []byte) ([]byte, error) {
 			if found {
 				return node.values[index], nil
 			}
-			return nil, NewStorageError(ErrCodeInvalidOperation, "Key not found", nil)
+			return nil, NewStorageError("search", fmt.Errorf("key not found"))
 		}
 
 		// Follow the appropriate child pointer
@@ -497,7 +658,7 @@ func (bpt *BPlusTree) deleteKey(node *BTreeNode, key []byte) error {
 
 	if node.header.IsLeaf {
 		if !found {
-			return NewStorageError(ErrCodeInvalidOperation, "Key not found", nil)
+			return NewStorageError("delete key", fmt.Errorf("key not found"))
 		}
 
 		// Remove the key and value

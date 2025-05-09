@@ -74,9 +74,6 @@ func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
 			FreeEnd:        PageSize,
 			TotalFreeSpace: PageSize - headerSize,
 			Flags:          0,
-			// LSN:            0,
-			// Checksum:       0,
-			// TransactionID:  0,
 		},
 		Data:  make([]byte, PageSize-headerSize),
 		dirty: true,
@@ -85,14 +82,8 @@ func NewPage(sm *StorageManager, pageType PageType, id uint32) (*Page, error) {
 	// Add the page to the buffer pool
 	err = sm.bufferPool.AddPage(page)
 	if err != nil {
-		return nil, NewStorageError(ErrCodeStorageIO, "Failed to add new page to buffer pool", err)
+		return nil, NewStorageError("add new page to buffer pool", err)
 	}
-
-	// Save new page to disk
-	// err = sm.SavePage(page)
-	// if err != nil {
-	// 	return nil, NewStorageError(ErrCodeStorageIO, "Failed to save new page", err)
-	// }
 
 	return page, nil
 }
@@ -114,7 +105,7 @@ func AddCell(page *Page, cell []byte) (uint32, error) {
 
 	// Check if there's enough space
 	if header.TotalFreeSpace < cellSize+DefaultCellPointerSize {
-		return 0, NewStorageError(ErrCodePageFull, "Not enough space in page", nil)
+		return 0, NewStorageError("add cell", fmt.Errorf("not enough space in page"))
 	}
 
 	// Create cell pointer
@@ -137,7 +128,6 @@ func AddCell(page *Page, cell []byte) (uint32, error) {
 	header.FreeEnd -= cellSize
 	header.FreeStart += DefaultCellPointerSize
 	header.TotalFreeSpace = header.FreeEnd - header.FreeStart
-	// header.TransactionID = txID
 	page.dirty = true
 
 	return getIdFromCellPointerOffset(pointerOffset), nil
@@ -148,7 +138,7 @@ func GetCell(page *Page, index uint32) ([]byte, error) {
 	offset := getOffsetCellPointerFromId(index)
 
 	if offset >= page.Header.FreeStart {
-		return nil, NewStorageError(ErrCodeInvalidOperation, fmt.Sprintf("Invalid cell index: %d", index), nil)
+		return nil, NewStorageError("get cell", fmt.Errorf("invalid cell index: %d", index))
 	}
 
 	// Read cell pointer
@@ -158,11 +148,7 @@ func GetCell(page *Page, index uint32) ([]byte, error) {
 	size := binary.LittleEndian.Uint32(pointerData[4:])
 
 	if location == 0 || size == 0 {
-		return nil, NewStorageError(
-			ErrCodeInvalidOperation,
-			fmt.Sprintf("Cell at index %d has been deleted", index),
-			nil,
-		)
+		return nil, NewStorageError("get cell", fmt.Errorf("cell at index %d has been deleted", index))
 	}
 
 	// Read cell data
@@ -174,12 +160,11 @@ func RemoveCell(page *Page, index uint32) error {
 	offset := getOffsetCellPointerFromId(index)
 
 	if offset >= page.Header.FreeStart {
-		return NewStorageError(ErrCodeInvalidOperation, fmt.Sprintf("Invalid cell index: %d", index), nil)
+		return NewStorageError("remove cell", fmt.Errorf("invalid cell index: %d", index))
 	}
 
 	header := &page.Header
 	header.Flags |= CanCompact
-	// header.TransactionID = txID
 	page.dirty = true
 
 	// Mark cell as deleted by setting its location and size to 0
@@ -199,13 +184,13 @@ func GetPointerList(page *Page) (PointerList, error) {
 
 	for offset < header.FreeStart {
 		if offset+DefaultCellPointerSize > uint32(len(page.Data))+DefaultPageHeaderSize {
-			return PointerList{}, NewStorageError(ErrCodePageCorrupted, "Pointer offset out of bounds", nil)
+			return PointerList{}, NewStorageError("get pointer list", fmt.Errorf("pointer offset out of bounds"))
 		}
 
 		dataOffset := offset - DefaultPageHeaderSize
 
 		if dataOffset+DefaultCellPointerSize > uint32(len(page.Data)) {
-			return PointerList{}, NewStorageError(ErrCodePageCorrupted, "Pointer data offset out of bounds", nil)
+			return PointerList{}, NewStorageError("get pointer list", fmt.Errorf("pointer data offset out of bounds"))
 		}
 
 		location := binary.LittleEndian.Uint32(page.Data[dataOffset : dataOffset+4])
@@ -235,7 +220,7 @@ func Compact(sm *StorageManager, page *Page) error {
 	// Get existing cell pointers
 	pointerList, err := GetPointerList(page)
 	if err != nil {
-		return NewStorageError(ErrCodePageCorrupted, "Failed to get pointer list during compaction", err)
+		return NewStorageError("compact", fmt.Errorf("failed to get pointer list during compaction: %w", err))
 	}
 
 	// Create a temporary page with the same ID and type
@@ -248,9 +233,6 @@ func Compact(sm *StorageManager, page *Page) error {
 			FreeEnd:        PageSize,
 			TotalFreeSpace: PageSize - DefaultPageHeaderSize,
 			Flags:          0,
-			// LSN:            page.Header.LSN,
-			// Checksum:       page.Header.Checksum,
-			// TransactionID:  page.Header.TransactionID,
 		},
 		Data:  make([]byte, PageSize-DefaultPageHeaderSize),
 		dirty: true,
@@ -262,7 +244,7 @@ func Compact(sm *StorageManager, page *Page) error {
 			cellData := page.Data[ptr.Location-DefaultPageHeaderSize : ptr.Location-DefaultPageHeaderSize+ptr.Size]
 			_, err := AddCell(tempPage, cellData)
 			if err != nil {
-				return NewStorageError(ErrCodeStorageIO, "Failed to add cell during compaction", err)
+				return NewStorageError("compact", fmt.Errorf("failed to add cell during compaction: %w", err))
 			}
 		}
 	}
@@ -285,12 +267,12 @@ func (p *Page) Serialize() ([]byte, error) {
 
 	// Write header
 	if err := binary.Write(buf, binary.LittleEndian, p.Header); err != nil {
-		return nil, NewStorageError(ErrCodeStorageIO, "Failed to serialize page header", err)
+		return nil, NewStorageError("serialize page header", err)
 	}
 
 	// Write data
 	if _, err := buf.Write(p.Data); err != nil {
-		return nil, NewStorageError(ErrCodeStorageIO, "Failed to serialize page data", err)
+		return nil, NewStorageError("serialize page data", err)
 	}
 
 	// Ensure the buffer is PageSize bytes
@@ -308,25 +290,21 @@ func (p *Page) Serialize() ([]byte, error) {
 // Deserialize reads the page from a byte array
 func (p *Page) Deserialize(data []byte) error {
 	if len(data) != PageSize {
-		return NewStorageError(
-			ErrCodePageCorrupted,
-			fmt.Sprintf("Invalid page size: expected %d, got %d", PageSize, len(data)),
-			nil,
-		)
+		return NewStorageError("deserialize", fmt.Errorf("invalid page size: expected %d, got %d", PageSize, len(data)))
 	}
 
 	buf := bytes.NewReader(data)
 
 	// Read header
 	if err := binary.Read(buf, binary.LittleEndian, &p.Header); err != nil {
-		return NewStorageError(ErrCodePageCorrupted, "Failed to deserialize page header", err)
+		return NewStorageError("deserialize page header", err)
 	}
 
 	// Read data
 	headerSize := DefaultPageHeaderSize
 	p.Data = make([]byte, PageSize-headerSize)
 	if _, err := buf.Read(p.Data); err != nil {
-		return NewStorageError(ErrCodePageCorrupted, "Failed to deserialize page data", err)
+		return NewStorageError("deserialize page data", err)
 	}
 
 	p.dirty = false
@@ -337,7 +315,7 @@ func (p *Page) Deserialize(data []byte) error {
 func (p *Page) serializeHeader() ([]byte, error) {
 	headerSize := binary.Size(p.Header)
 	if headerSize < 0 {
-		return nil, NewStorageError(ErrCodeInvalidOperation, "Invalid header size", nil)
+		return nil, NewStorageError("serialize header", fmt.Errorf("invalid header size"))
 	}
 
 	headerBytes := make([]byte, headerSize)
@@ -345,7 +323,7 @@ func (p *Page) serializeHeader() ([]byte, error) {
 
 	err := binary.Write(buf, binary.LittleEndian, &p.Header)
 	if err != nil {
-		return nil, NewStorageError(ErrCodeInvalidOperation, "Failed to serialize header", err)
+		return nil, NewStorageError("serialize header", err)
 	}
 
 	return buf.Bytes(), nil
