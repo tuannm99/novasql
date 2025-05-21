@@ -5,8 +5,7 @@ import (
 	"log"
 	"os"
 
-	// "github.com/tuannm99/novasql"
-	"github.com/tuannm99/novasql/pkg/storage"
+	"github.com/tuannm99/novasql/internal/storage"
 )
 
 func main() {
