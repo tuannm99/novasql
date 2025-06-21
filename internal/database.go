@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/tuannm99/novasql/internal/storage"
+	"github.com/tuannm99/novasql/internal/storage/embedded"
 )
 
 var (
@@ -18,13 +19,13 @@ type Operator interface{}
 
 type Database struct {
 	mu     sync.RWMutex
-	pager  *storage.Pager
+	pager  *embedded.Pager
 	mode   storage.StorageMode
 	closed bool
 }
 
 func NewDatabase(filename string, mode storage.StorageMode) (*Database, error) {
-	pager, err := storage.NewPager(filename, storage.PageSize)
+	pager, err := embedded.NewPager(filename, storage.PageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pager: %w", err)
 	}
@@ -52,7 +53,7 @@ func (db *Database) Close() error {
 	return nil
 }
 
-func (db *Database) GetPage(pageID int) (*storage.Page, error) {
+func (db *Database) GetPage(pageID int) (*embedded.Page, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 

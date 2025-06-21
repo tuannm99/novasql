@@ -1,4 +1,4 @@
-package classic
+package embedded 
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	DefaultPageHeaderSize  = 32
+	PageHeaderSize  = 32
 	DefaultCellPointerSize = 8
 )
 
@@ -18,7 +18,7 @@ const PageSize = storage.PageSize
 
 type PageHeader struct {
 	ID             uint32
-	Type           PageType
+	Type           storage.PageType
 	FreeStart      uint32
 	FreeEnd        uint32
 	TotalFreeSpace uint32
@@ -94,9 +94,9 @@ func (p *Page) Serialize() ([]byte, error) {
 	if err := binary.Write(buf, binary.LittleEndian, PageHeader{
 		ID:             uint32(p.pageNum),
 		Type:           storage.PageType(p.Data[0]),
-		FreeStart:      uint32(DefaultPageHeaderSize),
+		FreeStart:      uint32(PageHeaderSize),
 		FreeEnd:        uint32(len(p.Data)),
-		TotalFreeSpace: uint32(len(p.Data) - DefaultPageHeaderSize),
+		TotalFreeSpace: uint32(len(p.Data) - PageHeaderSize),
 		Flags:          0,
 	}); err != nil {
 		return nil, fmt.Errorf("serialize page header: %w", err)
@@ -130,7 +130,7 @@ func (p *Page) Deserialize(data []byte) error {
 	}
 
 	p.pageNum = int(header.ID)
-	p.Data = make([]byte, PageSize-DefaultPageHeaderSize)
+	p.Data = make([]byte, PageSize-PageHeaderSize)
 	if _, err := buf.Read(p.Data); err != nil {
 		return fmt.Errorf("deserialize page data: %w", err)
 	}

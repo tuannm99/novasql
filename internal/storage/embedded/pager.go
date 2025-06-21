@@ -1,10 +1,12 @@
-package classic
+package embedded
 
 import (
 	"fmt"
 	"io"
 	"os"
 	"sync"
+
+	"github.com/tuannm99/novasql/internal/storage"
 )
 
 type Pager struct {
@@ -16,7 +18,7 @@ type Pager struct {
 }
 
 func NewPager(filename string, pageSize int) (*Pager, error) {
-	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, FileMode0664)
+	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, storage.FileMode0664)
 	if err != nil {
 		return nil, fmt.Errorf("open database file: %w", err)
 	}
