@@ -1,3 +1,4 @@
+// sqlite like storage
 package embedded
 
 import (
