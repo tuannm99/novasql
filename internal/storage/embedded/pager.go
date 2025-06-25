@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/tuannm99/novasql/internal/storage"
+	"github.com/tuannm99/novasql/internal/storage/common"
 )
 
 type Pager struct {
@@ -18,16 +18,16 @@ type Pager struct {
 	mu        sync.RWMutex
 }
 
-func NewPager(filename string, pageSize int) (*Pager, error) {
-	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, storage.FileMode0664)
+func NewPager(filename string, pageSize int) (error, *Pager) {
+	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, common.FileMode0664)
 	if err != nil {
-		return nil, fmt.Errorf("open database file: %w", err)
+		return fmt.Errorf("open database file: %w", err), nil
 	}
 
 	fileInfo, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("get file info: %w", err)
+		return fmt.Errorf("get file info: %w", err), nil
 	}
 
 	pager := &Pager{
@@ -37,7 +37,7 @@ func NewPager(filename string, pageSize int) (*Pager, error) {
 		pageCount: int(fileInfo.Size()) / pageSize,
 	}
 
-	return pager, nil
+	return nil, pager
 }
 
 func (p *Pager) GetPage(pageNum int) (*Page, error) {
@@ -116,4 +116,12 @@ func (p *Pager) PageSize() int {
 
 func (p *Pager) File() *os.File {
 	return p.file
+}
+
+func (p *Pager) Serialize() ([]byte, error) {
+	return nil, nil
+}
+
+func (p *Pager) Deserialize(data []byte) error {
+	return nil
 }

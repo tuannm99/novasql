@@ -6,7 +6,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/tuannm99/novasql/internal/storage"
+	"github.com/tuannm99/novasql/internal/storage/common"
 	"github.com/tuannm99/novasql/internal/storage/embedded"
 )
 
@@ -20,12 +20,12 @@ type Operator interface{}
 type Database struct {
 	mu     sync.RWMutex
 	pager  *embedded.Pager
-	mode   storage.StorageMode
+	mode   common.StorageMode
 	closed bool
 }
 
-func NewDatabase(filename string, mode storage.StorageMode) (*Database, error) {
-	pager, err := embedded.NewPager(filename, storage.PageSize)
+func NewDatabase(filename string, mode common.StorageMode) (*Database, error) {
+	err, pager := embedded.NewPager(filename, common.PageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pager: %w", err)
 	}
@@ -77,8 +77,8 @@ func (db *Database) WritePage(pageID int, data []byte) error {
 		return ErrDatabaseClosed
 	}
 
-	if len(data) != storage.PageSize {
-		return fmt.Errorf("invalid page size: expected %d, got %d", storage.PageSize, len(data))
+	if len(data) != common.PageSize {
+		return fmt.Errorf("invalid page size: expected %d, got %d", common.PageSize, len(data))
 	}
 
 	if err := db.pager.WritePage(pageID, data); err != nil {

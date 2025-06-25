@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/tuannm99/novasql/internal/storage"
+	"github.com/tuannm99/novasql/internal/storage/common"
 )
 
 const (
@@ -15,11 +15,11 @@ const (
 	DefaultCellPointerSize = 8
 )
 
-const PageSize = storage.PageSize
+const PageSize = common.PageSize
 
 type PageHeader struct {
 	ID             uint32
-	Type           storage.PageType
+	Type           common.PageType
 	FreeStart      uint32
 	FreeEnd        uint32
 	TotalFreeSpace uint32
@@ -38,7 +38,7 @@ func (p *Page) Write(offset int, data []byte) error {
 	defer p.mu.Unlock()
 
 	if offset+len(data) > len(p.Data) {
-		return storage.ErrPageFull
+		return common.ErrPageFull
 	}
 	copy(p.Data[offset:], data)
 	p.dirty = true
@@ -50,7 +50,7 @@ func (p *Page) Read(offset, length int) ([]byte, error) {
 	defer p.mu.RUnlock()
 
 	if offset+length > len(p.Data) {
-		return nil, storage.ErrPageFull
+		return nil, common.ErrPageFull
 	}
 	return p.Data[offset : offset+length], nil
 }
@@ -60,7 +60,7 @@ func (p *Page) WriteUint32(offset int, val uint32) error {
 	defer p.mu.Unlock()
 
 	if offset+4 > len(p.Data) {
-		return storage.ErrPageFull
+		return common.ErrPageFull
 	}
 	binary.LittleEndian.PutUint32(p.Data[offset:], val)
 	p.dirty = true
@@ -72,7 +72,7 @@ func (p *Page) ReadUint32(offset int) (uint32, error) {
 	defer p.mu.RUnlock()
 
 	if offset+4 > len(p.Data) {
-		return 0, storage.ErrPageFull
+		return 0, common.ErrPageFull
 	}
 	return binary.LittleEndian.Uint32(p.Data[offset:]), nil
 }
@@ -94,7 +94,7 @@ func (p *Page) Serialize() ([]byte, error) {
 
 	if err := binary.Write(buf, binary.LittleEndian, PageHeader{
 		ID:             uint32(p.pageNum),
-		Type:           storage.PageType(p.Data[0]),
+		Type:           common.PageType(p.Data[0]),
 		FreeStart:      uint32(PageHeaderSize),
 		FreeEnd:        uint32(len(p.Data)),
 		TotalFreeSpace: uint32(len(p.Data) - PageHeaderSize),

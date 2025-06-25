@@ -1,4 +1,4 @@
-package storage
+package common
 
 import (
 	"errors"
