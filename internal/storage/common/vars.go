@@ -2,6 +2,7 @@ package common
 
 import (
 	"errors"
+	"fmt"
 )
 
 const (
@@ -48,6 +49,21 @@ func (s StorageMode) String() string {
 		return "wide_column"
 	default:
 		return "unknown"
+	}
+}
+
+func GetStorageMode(s string) (StorageMode, error) {
+	switch s {
+	case "embedded":
+		return Embedded, nil
+	case "classic":
+		return Classic, nil
+	case "document":
+		return Document, nil
+	case "wide_column":
+		return WideColumn, nil
+	default:
+		return 0, fmt.Errorf("invalid storage mode: %s", s)
 	}
 }
 

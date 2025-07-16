@@ -18,16 +18,17 @@ type Pager struct {
 	mu        sync.RWMutex
 }
 
-func NewPager(filename string, pageSize int) (error, *Pager) {
-	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, common.FileMode0664)
+func NewPager(filedir string, pageSize int) (*Pager, error) {
+	dbName := "novasql.db"
+	file, err := os.OpenFile(fmt.Sprintf("%s/%s", filedir, dbName), os.O_RDWR|os.O_CREATE, common.FileMode0664)
 	if err != nil {
-		return fmt.Errorf("open database file: %w", err), nil
+		return nil, fmt.Errorf("open database file: %w", err)
 	}
 
 	fileInfo, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
-		return fmt.Errorf("get file info: %w", err), nil
+		return nil, fmt.Errorf("get file info: %w", err)
 	}
 
 	pager := &Pager{
@@ -37,7 +38,7 @@ func NewPager(filename string, pageSize int) (error, *Pager) {
 		pageCount: int(fileInfo.Size()) / pageSize,
 	}
 
-	return nil, pager
+	return pager, nil
 }
 
 func (p *Pager) GetPage(pageNum int) (*Page, error) {

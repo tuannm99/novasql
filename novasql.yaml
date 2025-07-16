@@ -1,0 +1,8 @@
+app_name: novasql
+storage:
+  mode: embedded
+  workdir: ./data
+  page_size: 8192
+server:
+  port: 8866
+  debug: false

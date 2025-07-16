@@ -323,11 +323,7 @@ func (t *BTreeIndex) writeOverflowChain(data []byte) (int64, error) {
 	currentPageNum := firstPageNum
 
 	for len(data) > 0 {
-
-		chunkSize := pageSize
-		if chunkSize > len(data) {
-			chunkSize = len(data)
-		}
+		chunkSize := min(pageSize, len(data))
 
 		pageData := make([]byte, t.pager.PageSize())
 		nextPage := int64(-1)
