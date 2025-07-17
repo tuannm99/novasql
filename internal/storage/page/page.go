@@ -1,5 +1,4 @@
-// sqlite like storage
-package embedded 
+package page 
 
 import (
 	"bytes"
