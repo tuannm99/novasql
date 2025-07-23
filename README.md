@@ -16,6 +16,7 @@ NovaSQL is a database system written from scratch as a learning journey into dat
 ### Core Database Components
 
 - **Page Management**
+
   - Slotted Page implementation
   - B+Tree indexing structure
   - Free Space Management (FSM)
@@ -23,12 +24,14 @@ NovaSQL is a database system written from scratch as a learning journey into dat
   - Log-Structured Merge Tree (LSM-Tree)
 
 - **SQL Processing**
+
   - Query parsing and optimization
   - Execution plans
   - Join implementations
   - ORM layer built from scratch
 
 - **ACID Properties**
+
   - Write-Ahead Logging (WAL)
   - Transaction management
   - Isolation levels implementation
@@ -52,11 +55,13 @@ NovaSQL is a database system written from scratch as a learning journey into dat
 ### Programming Insights
 
 - **Low-Level Programming**
+
   - Binary & byte processing complexities
   - Operating system interactions
   - Network programming fundamentals
 
 - **Data Structures & Algorithms**
+
   - Bloom filter implementation
   - B+Tree for efficient indexing
   - Clock algorithm
@@ -69,24 +74,15 @@ NovaSQL is a database system written from scratch as a learning journey into dat
   - ACID properties in practice
   - Concurrent programming patterns
 
-### Project Management Insights
-
-- Time management is crucial, especially allocating research time
-- Breaking complex problems into manageable pieces is essential
-- Avoid "unsafe" operations when possible
-- Leverage third-party packages for improved concurrency
-- Design patterns can be cumbersome in low-level programming
-  - They take longer to implement
-  - Abstraction can complicate code at lower levels
-- Documentation is most effective when completed after implementation
-
 ## 🔬 Fundamental Concepts
 
 ### Data Persistence
+
 - Working with in-memory data structures is challenging; persisting them to disk adds complexity
 - Essential understanding of operating systems, byte manipulation, and file systems required
 
 ### Database Core Operations
+
 - Database disk write patterns
 - CPU interactions with disk and memory
 - Client-server communication (SQL statement transmission)
@@ -95,11 +91,13 @@ NovaSQL is a database system written from scratch as a learning journey into dat
 ## 🛣️ Roadmap
 
 ### Current Implementation
+
 - Basic page management
 - Initial B+Tree structure
 - Fundamental query processing
 
 ### Planned Features
+
 - Enhanced ACID compliance
 - More join algorithms
 - Improved transaction isolation
@@ -151,6 +149,7 @@ The journey of building NovaSQL has revealed many areas for future exploration:
 ## 🙏 Acknowledgements
 
 This project draws inspiration from various database systems and educational resources, including:
+
 - SQLite
 - PostgreSQL
 - CMU Database Systems Course

@@ -1,6 +1,6 @@
 app_name: novasql
 storage:
-  mode: embedded
+  mode: embedded # classic | wide_column
   workdir: ./data
   page_size: 8192
 server:
