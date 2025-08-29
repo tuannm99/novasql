@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/tuannm99/novasql"
 	"github.com/tuannm99/novasql/internal"
 	"github.com/tuannm99/novasql/internal/storage/common"
 )
@@ -27,10 +28,16 @@ func main() {
 		panic(err)
 	}
 
-	_, err = internal.NewDatabase(*workDir, storageMode)
+	db, err := novasql.NewDatabase(*workDir, storageMode)
 	if err != nil {
 		panic(err)
 	}
+
+	_, err = db.GetPage(1)
+	if err != nil {
+		panic(err)
+	}
+	// page.Deserialize()
 
 	select {}
 }

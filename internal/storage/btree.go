@@ -1,4 +1,4 @@
-package page
+package storage
 
 import (
 	"bytes"
@@ -182,7 +182,6 @@ func (t *BTreeIndex) Search(key int64) (int64, error) {
 	}
 
 	for {
-
 		pos := 0
 		for pos < len(node.Keys) && node.Keys[pos] < key {
 			pos++
