@@ -28,6 +28,7 @@ func (r *RefCount) Dec() bool {
 	return newCount == 0
 }
 
+
 func (r *RefCount) Get() int32 {
 	return atomic.LoadInt32(&r.count)
 }

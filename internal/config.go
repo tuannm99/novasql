@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/viper"
-	"github.com/tuannm99/novasql/internal/storage/common"
+	"github.com/tuannm99/novasql/internal/storage"
 )
 
 type NovaSqlConfig struct {
@@ -20,7 +20,7 @@ type NovaSqlConfig struct {
 }
 
 type Config struct {
-	Mode common.StorageMode
+	Mode storage.StorageMode
 }
 
 func LoadConfig(path string) (*NovaSqlConfig, error) {
