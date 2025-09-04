@@ -8,12 +8,12 @@ import (
 )
 
 func TestStorageManager(t *testing.T) {
-	// tạo SM + FileSet cho quan hệ "12345" trong thư mục "data/base/16384"
-	sm := storage.NewStorageManager("data")
-	fs := storage.LocalFileSet{Dir: "data/base/16384", Base: "12345"}
+	fs := storage.LocalFileSet{Dir: "../../data/test/base/16384", Base: "12345"}
+	sm := storage.NewStorageManager()
 
 	// Load page
 	pg, err := sm.LoadPage(fs, 0)
-	assert.NotNil(t, err)
+	assert.Nil(t, err)
 	assert.NotNil(t, pg)
+	assert.IsType(t, &storage.Page{}, pg)
 }

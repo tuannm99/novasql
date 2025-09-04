@@ -1,6 +1,6 @@
 module github.com/tuannm99/novasql
 
-go 1.24.6
+go 1.24.2
 
 require (
 	github.com/spf13/viper v1.20.1

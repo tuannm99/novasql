@@ -13,10 +13,11 @@ var (
 	ErrPageFull     = errors.New("storage_manager: write would exceed page data length")
 )
 
-// FileSet: mở đúng segment (segNo) của 1 quan hệ
 type FileSet interface {
 	OpenSegment(segNo int32) (*os.File, error)
 }
+
+var _ FileSet = (*LocalFileSet)(nil)
 
 // LocalFileSet:  (dir + basename relfilenode)
 type LocalFileSet struct {
@@ -39,12 +40,10 @@ func (lfs LocalFileSet) OpenSegment(segNo int32) (*os.File, error) {
 
 // StorageManager:
 // mapping pageID -> (segment, offset)
-type StorageManager struct {
-	Workdir string
-}
+type StorageManager struct{}
 
-func NewStorageManager(workdir string) *StorageManager {
-	return &StorageManager{Workdir: workdir}
+func NewStorageManager() *StorageManager {
+	return &StorageManager{}
 }
 
 func (sm *StorageManager) pagesPerSegment() int {
@@ -93,12 +92,12 @@ func (sm *StorageManager) WritePage(fs FileSet, pageID int32, src []byte) error 
 	return err
 }
 
-func (sm *StorageManager) LoadPage(fs FileSet, pageID uint32) (Page, error) {
+func (sm *StorageManager) LoadPage(fs FileSet, pageID uint32) (*Page, error) {
 	buf := make([]byte, PageSize)
 	if err := sm.ReadPage(fs, int32(pageID), buf); err != nil {
-		return Page{}, err
+		return nil, err
 	}
-	p := Page{Buf: buf}
+	p := &Page{Buf: buf}
 	if p.IsUninitialized() {
 		p.init(pageID)
 	}
