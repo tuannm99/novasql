@@ -21,8 +21,8 @@ var _ FileSet = (*LocalFileSet)(nil)
 
 // LocalFileSet:  (dir + basename relfilenode)
 type LocalFileSet struct {
-	Dir  string // base/16384
-	Base string // 12345  (not include .N)
+	Dir  string
+	Base string
 }
 
 func (lfs LocalFileSet) OpenSegment(segNo int32) (*os.File, error) {
@@ -72,7 +72,6 @@ func (sm *StorageManager) ReadPage(fs FileSet, pageID int32, dst []byte) error {
 	if err != nil && err != io.EOF {
 		return err
 	}
-	// zero-fill phần thiếu (page mới)
 	for i := n; i < PageSize; i++ {
 		dst[i] = 0
 	}

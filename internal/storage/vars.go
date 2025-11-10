@@ -11,11 +11,10 @@ const (
 	OneMB = OneKB * 1024
 	OneGB = OneMB * 1024
 
-	PageSize    = OneKB * 8
 	SegmentSize = 1 << 30 // 1 GiB
-
-	HeaderSize  = 24
-	SlotSize    = 6
+	PageSize    = OneKB * 8
+	HeaderSize  = 12
+	SlotSize    = 6 // 3 * uint16 (offset, length, flags)
 )
 
 const (

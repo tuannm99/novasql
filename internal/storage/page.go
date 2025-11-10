@@ -1,35 +1,36 @@
 package storage
 
-const (
-	_256   = 256
-	_256_2 = 256 * 256
-	_256_3 = 256 * 256 * 256
-	_256_4 = 256 * 256 * 256 * 256
-	_256_5 = _256_4 * 256
-	_256_6 = _256_5 * 256
-	_256_7 = _256_6 * 256
+import (
+	"encoding/binary"
+	"errors"
 )
 
-func GetU16(b []byte, offset int) uint16 {
-	return uint16(b[offset]) + uint16(b[offset+1])*_256
-}
+// Header offsets
+const (
+	offFlags   = 0
+	offPageID  = 2
+	offLower   = 6
+	offUpper   = 8
+	offSpecial = 10
+)
 
-func PutU16(b []byte, offset int, v uint16) {
-	b[offset], b[offset+1] = byte(v%_256), byte(v/_256)
-}
+// Slot flags
+const (
+	SlotFlagDeleted uint16 = 1
+	SlotFlagMoved   uint16 = 2
+)
 
-func GetU32(b []byte, offset int) uint32 {
-	return uint32(b[offset]) +
-		uint32(b[offset+1])*_256 +
-		uint32(b[offset+2])*_256_2 +
-		uint32(b[offset+3])*_256_3
-}
+var (
+	ErrNoSpace    = errors.New("page: not enough free space")
+	ErrBadSlot    = errors.New("page: invalid slot")
+	ErrCorruption = errors.New("page: corrupt slot or tuple bounds")
+	ErrWrongSize  = errors.New("page: buffer size != PageSize")
+)
 
-func PutU32(b []byte, offset int, v uint32) {
-	b[offset] = byte(v % _256)
-	b[offset+1] = byte((v / _256) % _256)
-	b[offset+2] = byte((v / (_256 * _256)) % _256)
-	b[offset+3] = byte((v / (_256 * _256 * _256)) % _256)
+type Slot struct {
+	Offset uint16
+	Length uint16
+	Flags  uint16
 }
 
 // +------------------+ 0
@@ -42,121 +43,176 @@ func PutU32(b []byte, offset int, v uint32) {
 // +------------------+ <-- pd_upper
 // |  Tuple Data      |
 // |  (grows down)    |
-// +------------------+ <-- pd_special
+// +------------------+ <-- pd_special (unused)
 // |  Special Space   |
-// |  (fixed size)    |
 // +------------------+ Block/Page Size (8192)
 type Page struct {
-	// buf := make([]byte, PageSize) -> max is only 8192
-	Buf []byte
+	Buf []byte // fixed-size 8KB
 }
 
-func NewPage(buf []byte, pageID uint32) Page {
-	p := Page{Buf: buf}
+func NewPage(buf []byte, pageID uint32) (*Page, error) {
+	if len(buf) != PageSize {
+		return nil, ErrWrongSize
+	}
+	p := &Page{Buf: buf}
 	p.init(pageID)
-	return p
+	return p, nil
 }
 
-// ---- Page methods ----
-func (p Page) init(pageID uint32) {
+// ---- low-level header getters/setters ----
+func (p *Page) flags() uint16 {
+	return binary.LittleEndian.Uint16(p.Buf[offFlags:])
+}
+
+func (p *Page) setFlags(v uint16) {
+	binary.LittleEndian.PutUint16(p.Buf[offFlags:], v)
+}
+
+func (p *Page) pageID() uint32 {
+	return binary.LittleEndian.Uint32(p.Buf[offPageID:])
+}
+
+func (p *Page) setPageID(v uint32) {
+	binary.LittleEndian.PutUint32(p.Buf[offPageID:], v)
+}
+
+func (p *Page) lower() uint16 {
+	return binary.LittleEndian.Uint16(p.Buf[offLower:])
+}
+
+func (p *Page) setLower(v uint16) {
+	binary.LittleEndian.PutUint16(p.Buf[offLower:], v)
+}
+
+func (p *Page) upper() uint16 {
+	return binary.LittleEndian.Uint16(p.Buf[offUpper:])
+}
+
+func (p *Page) setUpper(v uint16) {
+	binary.LittleEndian.PutUint16(p.Buf[offUpper:], v)
+}
+
+func (p *Page) special() uint16 {
+	return binary.LittleEndian.Uint16(p.Buf[offSpecial:])
+}
+
+func (p *Page) setSpecial(v uint16) {
+	binary.LittleEndian.PutUint16(p.Buf[offSpecial:], v)
+}
+
+func (p *Page) init(pageID uint32) {
+	// zero page
 	for i := range p.Buf {
 		p.Buf[i] = 0
 	}
-	PutU16(p.Buf, 0, 0)          // flags
-	PutU32(p.Buf, 2, pageID)     // page_id
-	PutU16(p.Buf, 6, HeaderSize) // pd_lower
-	PutU16(p.Buf, 8, PageSize)   // pd_upper
-	PutU16(p.Buf, 10, PageSize)  // pd_special (unused yet)
+	p.setFlags(0)
+	p.setPageID(pageID)
+	p.setLower(HeaderSize)
+	p.setUpper(PageSize)
+	p.setSpecial(PageSize) // unused for now
 }
 
-func (p Page) Lower() int {
-	return int(GetU16(p.Buf, 6))
+// ---- public helpers ----
+func (p *Page) FreeSpace() int { return int(p.upper() - p.lower()) }
+func (p *Page) NumSlots() int  { return int(p.lower()-HeaderSize) / SlotSize }
+
+func (p *Page) IsUninitialized() bool {
+	return p.lower() == 0 && p.upper() == 0
 }
 
-func (p Page) SetLower(v int) {
-	PutU16(p.Buf, 6, uint16(v))
-}
-
-func (p Page) Upper() int {
-	return int(GetU16(p.Buf, 8))
-}
-
-func (p Page) SetUpper(v int) {
-	PutU16(p.Buf, 8, uint16(v))
-}
-
-func (p Page) NumSlots() int {
-	return (p.Lower() - HeaderSize) / SlotSize
-}
-
-func (p Page) slotOff(idx int) int {
+// ---- slots ----
+func (p *Page) slotOff(idx int) int {
 	return HeaderSize + idx*SlotSize
 }
 
-func (p Page) GetSlot(i int) (offset, linePointer, flags int) {
+func (p *Page) getSlot(i int) (Slot, error) {
+	if i < 0 || i >= p.NumSlots() {
+		return Slot{}, ErrBadSlot
+	}
 	o := p.slotOff(i)
-	return int(GetU16(p.Buf, o)),
-		int(GetU16(p.Buf, o+2)),
-		int(GetU16(p.Buf, o+4))
+	_ = p.Buf[o+5]
+	return Slot{
+		Offset: binary.LittleEndian.Uint16(p.Buf[o+0:]),
+		Length: binary.LittleEndian.Uint16(p.Buf[o+2:]),
+		Flags:  binary.LittleEndian.Uint16(p.Buf[o+4:]),
+	}, nil
 }
 
-func (p Page) PutSlot(idx, offset, linePointer, flags int) {
-	o := p.slotOff(idx)
-	PutU16(p.Buf, o, uint16(offset))
-	PutU16(p.Buf, o+2, uint16(linePointer))
-	PutU16(p.Buf, o+4, uint16(flags))
+func (p *Page) putSlot(idx int, s Slot) error {
+	if idx < 0 || idx > p.NumSlots() {
+		// allow writing next slot only via append
+		return ErrBadSlot
+	}
+	slotOfIdx := p.slotOff(idx)
+	_ = p.Buf[slotOfIdx+5]
+	binary.LittleEndian.PutUint16(p.Buf[slotOfIdx+0:], s.Offset)
+	binary.LittleEndian.PutUint16(p.Buf[slotOfIdx+2:], s.Length)
+	binary.LittleEndian.PutUint16(p.Buf[slotOfIdx+4:], s.Flags)
+	return nil
 }
 
-func (p Page) appendSlot(offset, linePointer, flags int) int {
+func (p *Page) appendSlot(off, length, flags uint16) (int, error) {
 	i := p.NumSlots()
-	p.PutSlot(i, offset, linePointer, flags)
-	p.SetLower(p.Lower() + SlotSize)
-	return i
+	if err := p.putSlot(i, Slot{Offset: off, Length: length, Flags: flags}); err != nil {
+		return -1, err
+	}
+	p.setLower(p.lower() + SlotSize)
+	return i, nil
 }
 
-func (p Page) IsUninitialized() bool {
-	return GetU16(p.Buf, 6) == 0 && GetU16(p.Buf, 8) == 0
-}
-
-func (p Page) InsertTuple(tup []byte) (slot int, ok bool) {
+// ---- tuples (payload) ----
+func (p *Page) InsertTuple(tup []byte) (slot int, err error) {
 	need := len(tup) + SlotSize
-	if p.Upper()-p.Lower() < need {
-		return -1, false
+	if p.FreeSpace() < need {
+		return -1, ErrNoSpace
 	}
-	u := p.Upper() - len(tup)
+	u := int(p.upper()) - len(tup)
 	copy(p.Buf[u:], tup)
-	p.SetUpper(u)
-	return p.appendSlot(u, len(tup), 0), true
+	p.setUpper(uint16(u))
+	return p.appendSlot(uint16(u), uint16(len(tup)), 0)
 }
 
-func (p Page) ReadTuple(slot int) ([]byte, bool) {
-	if slot < 0 || slot >= p.NumSlots() {
-		return nil, false
+func (p *Page) ReadTuple(slot int) ([]byte, error) {
+	s, err := p.getSlot(slot)
+	if err != nil {
+		return nil, err
 	}
-	offset, linePointer, flags := p.GetSlot(slot)
-	if flags != 0 || offset == 0 || linePointer == 0 {
-		return nil, false
+	if s.Flags != 0 || s.Offset == 0 || s.Length == 0 {
+		return nil, ErrCorruption
 	}
-	return p.Buf[offset : offset+linePointer], true
+	start, end := int(s.Offset), int(s.Offset)+int(s.Length)
+	if start < int(p.upper()) || end > PageSize || start >= end {
+		return nil, ErrCorruption
+	}
+	return p.Buf[start:end], nil
 }
 
-func (p Page) UpdateTuple(slot int, newTuple []byte) bool {
-	offset, linePointer, flags := p.GetSlot(slot)
-	if flags != 0 || offset == 0 || linePointer == 0 {
-		return false
+func (p *Page) UpdateTuple(slot int, newTuple []byte) error {
+	s, err := p.getSlot(slot)
+	if err != nil {
+		return err
 	}
-	if len(newTuple) <= linePointer {
-		copy(p.Buf[offset:], newTuple)
-		p.PutSlot(slot, offset, len(newTuple), 0)
-		return true
+	if s.Flags != 0 || s.Offset == 0 || s.Length == 0 {
+		return ErrBadSlot
 	}
-	if _, ok := p.InsertTuple(newTuple); !ok {
-		return false
+	// In-place shrink or equal
+	if len(newTuple) <= int(s.Length) {
+		copy(p.Buf[int(s.Offset):], newTuple)
+		return p.putSlot(slot, Slot{Offset: s.Offset, Length: uint16(len(newTuple)), Flags: 0})
 	}
-	p.PutSlot(slot, 0, 0, 2)
-	return true
+	// Need new space
+	newSlot, err := p.InsertTuple(newTuple)
+	if err != nil {
+		return err
+	}
+	// Mark old slot as moved
+	return p.putSlot(slot, Slot{Offset: 0, Length: 0, Flags: SlotFlagMoved | uint16(newSlot)})
 }
 
-func (p Page) DeleteTuple(slot int) {
-	p.PutSlot(slot, 0, 0, 1)
+func (p *Page) DeleteTuple(slot int) error {
+	_, err := p.getSlot(slot)
+	if err != nil {
+		return err
+	}
+	return p.putSlot(slot, Slot{Offset: 0, Length: 0, Flags: SlotFlagDeleted})
 }
