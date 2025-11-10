@@ -1,4 +1,4 @@
-package common
+package storage
 
 import (
 	"errors"
@@ -11,7 +11,10 @@ const (
 	OneMB = OneKB * 1024
 	OneGB = OneMB * 1024
 
-	PageSize = OneKB * 8
+	SegmentSize = 1 << 30 // 1 GiB
+	PageSize    = OneKB * 8
+	HeaderSize  = 12
+	SlotSize    = 6 // 3 * uint16 (offset, length, flags)
 )
 
 const (
@@ -68,8 +71,6 @@ func GetStorageMode(s string) (StorageMode, error) {
 }
 
 var (
-	ErrPageNotFound        = errors.New("storage: page not found")
-	ErrPageFull            = errors.New("storage: write would exceed page data length")
 	ErrWriteExceedPageSize = errors.New("storage: write would exceed page size")
 	ErrReadExceedPageSize  = errors.New("storage: read would exceed page size")
 	ErrPageCorrupted       = errors.New("storage: page is corrupted")
