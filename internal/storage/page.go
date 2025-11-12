@@ -1,11 +1,12 @@
 package storage
 
 import (
-	"encoding/binary"
 	"errors"
+
+	"github.com/tuannm99/novasql/internal/alias/bx"
 )
 
-// Header offsets
+// Fixed Header offsets
 const (
 	offFlags   = 0
 	offPageID  = 2
@@ -14,11 +15,11 @@ const (
 	offSpecial = 10
 )
 
-// Slot flags
+// Slot flags (similar to Postgres)
 const (
-	SlotFlagNormal  uint16 = 0
-	SlotFlagDeleted uint16 = 1 << 0
-	SlotFlagMoved   uint16 = 1 << 1
+	SlotFlagNormal  uint16 = 0      // LP_NORMAL
+	SlotFlagDeleted uint16 = 1 << 0 // LP_DEAD
+	SlotFlagMoved   uint16 = 1 << 1 // LP_REDIRECT
 )
 
 var (
@@ -62,57 +63,29 @@ func NewPage(buf []byte, pageID uint32) (*Page, error) {
 }
 
 // ---- low-level header getters/setters ----
-func (p *Page) flags() uint16 {
-	return binary.LittleEndian.Uint16(p.Buf[offFlags:])
-}
+func (p *Page) flags() uint16       { return bx.U16At(p.Buf, offFlags) }
+func (p *Page) setFlags(v uint16)   { bx.PutU16At(p.Buf, offFlags, v) }
+func (p *Page) PageID() uint32      { return bx.U32At(p.Buf, offPageID) }
+func (p *Page) setPageID(v uint32)  { bx.PutU32At(p.Buf, offPageID, v) }
+func (p *Page) lower() uint16       { return bx.U16At(p.Buf, offLower) }
+func (p *Page) setLower(v uint16)   { bx.PutU16At(p.Buf, offLower, v) }
+func (p *Page) upper() uint16       { return bx.U16At(p.Buf, offUpper) }
+func (p *Page) setUpper(v uint16)   { bx.PutU16At(p.Buf, offUpper, v) }
+func (p *Page) special() uint16     { return bx.U16At(p.Buf, offSpecial) }
+func (p *Page) setSpecial(v uint16) { bx.PutU16At(p.Buf, offSpecial, v) }
 
-func (p *Page) setFlags(v uint16) {
-	binary.LittleEndian.PutUint16(p.Buf[offFlags:], v)
-}
+func (p *Page) IsUninitialized() bool { return p.lower() == 0 && p.upper() == 0 }
+func (p *Page) FreeSpace() int        { return int(p.upper() - p.lower()) }
+func (p *Page) NumSlots() int         { return int(p.lower()-HeaderSize) / SlotSize }
+func (p *Page) slotOff(idx int) int   { return HeaderSize + idx*SlotSize }
 
-func (p *Page) PageID() uint32 {
-	return binary.LittleEndian.Uint32(p.Buf[offPageID:])
-}
-
-func (p *Page) setPageID(v uint32) {
-	binary.LittleEndian.PutUint32(p.Buf[offPageID:], v)
-}
-
-func (p *Page) lower() uint16 {
-	return binary.LittleEndian.Uint16(p.Buf[offLower:])
-}
-
-func (p *Page) setLower(v uint16) {
-	binary.LittleEndian.PutUint16(p.Buf[offLower:], v)
-}
-
-func (p *Page) upper() uint16 {
-	return binary.LittleEndian.Uint16(p.Buf[offUpper:])
-}
-
-func (p *Page) setUpper(v uint16) {
-	binary.LittleEndian.PutUint16(p.Buf[offUpper:], v)
-}
-
-func (p *Page) special() uint16 {
-	return binary.LittleEndian.Uint16(p.Buf[offSpecial:])
-}
-
-func (p *Page) setSpecial(v uint16) {
-	binary.LittleEndian.PutUint16(p.Buf[offSpecial:], v)
-}
-
-func (p *Page) markRedirect(oldIdx, newIdx int) error {
-	// Flags=Moved, Offset=slot đích, Length=0
-	return p.putSlot(oldIdx, Slot{
-		Offset: uint16(newIdx),
-		Length: 0,
-		Flags:  SlotFlagMoved,
-	})
+func (p *Page) markRedirect(old, nw int) error {
+	// Flags=MOVED, Offset=target slot, Length=0
+	return p.putSlot(old, Slot{Offset: uint16(nw), Length: 0, Flags: SlotFlagMoved})
 }
 
 func (p *Page) init(pageID uint32) {
-	// zero page
+	// zero the page
 	for i := range p.Buf {
 		p.Buf[i] = 0
 	}
@@ -123,60 +96,43 @@ func (p *Page) init(pageID uint32) {
 	p.setSpecial(PageSize) // unused for now
 }
 
-// ---- public helpers ----
-func (p *Page) FreeSpace() int {
-	return int(p.upper() - p.lower())
-}
-
-func (p *Page) NumSlots() int {
-	return int(p.lower()-HeaderSize) / SlotSize
-}
-
-func (p *Page) IsUninitialized() bool {
-	return p.lower() == 0 && p.upper() == 0
-}
-
 // ---- slots ----
-func (p *Page) slotOff(idx int) int {
-	return HeaderSize + idx*SlotSize
-}
-
 func (p *Page) getSlot(i int) (Slot, error) {
 	if i < 0 || i >= p.NumSlots() {
 		return Slot{}, ErrBadSlot
 	}
 	o := p.slotOff(i)
-	// slot phải nằm trong vùng [HeaderSize, lower)
+	// the slot must be within [HeaderSize, lower)
 	if o+SlotSize > int(p.lower()) {
 		return Slot{}, ErrCorruption
 	}
 	_ = p.Buf[o+5]
 	return Slot{
-		Offset: binary.LittleEndian.Uint16(p.Buf[o+0:]),
-		Length: binary.LittleEndian.Uint16(p.Buf[o+2:]),
-		Flags:  binary.LittleEndian.Uint16(p.Buf[o+4:]),
+		Offset: bx.U16(p.Buf[o+0:]),
+		Length: bx.U16(p.Buf[o+2:]),
+		Flags:  bx.U16(p.Buf[o+4:]),
 	}, nil
 }
 
 func (p *Page) putSlot(idx int, s Slot) error {
 	if idx < 0 || idx > p.NumSlots() {
-		// allow writing next slot only via append
+		// allow writing the next slot only via append
 		return ErrBadSlot
 	}
 	off := p.slotOff(idx)
 
-	// Nếu đang append slot mới (idx == NumSlots), đảm bảo còn chỗ cho header slot
+	// if appending a new slot (idx == NumSlots), ensure there is space for the slot header
 	if idx == p.NumSlots() && off+SlotSize > int(p.upper()) {
 		return ErrNoSpace
 	}
-	// Bảo vệ bounds chung
+	// general bound protection
 	if off+SlotSize > len(p.Buf) {
 		return ErrCorruption
 	}
 
-	binary.LittleEndian.PutUint16(p.Buf[off+0:], s.Offset)
-	binary.LittleEndian.PutUint16(p.Buf[off+2:], s.Length)
-	binary.LittleEndian.PutUint16(p.Buf[off+4:], s.Flags)
+	bx.PutU16(p.Buf[off+0:], s.Offset)
+	bx.PutU16(p.Buf[off+2:], s.Length)
+	bx.PutU16(p.Buf[off+4:], s.Flags)
 	return nil
 }
 
@@ -225,13 +181,13 @@ func (p *Page) ReadTuple(slot int) ([]byte, error) {
 			return p.Buf[start:end], nil
 
 		case SlotFlagMoved:
-			// follow redirect tới slot đích trong cùng page
+			// follow redirect to the target slot on the same page
 			if s.Length != 0 || s.Offset == 0 {
 				return nil, ErrCorruption
 			}
 			slot = int(s.Offset)
 			visited++
-			// tránh vòng lặp redirect bất thường
+			// prevent pathological redirect loops
 			if visited > p.NumSlots() {
 				return nil, ErrCorruption
 			}
@@ -264,7 +220,7 @@ func (p *Page) UpdateTuple(slot int, newTuple []byte) error {
 		})
 	}
 
-	// Need new space -> insert, rồi redirect slot cũ sang slot mới
+	// Need new space -> insert a fresh tuple, then redirect the old slot to the new slot
 	newSlot, err := p.InsertTuple(newTuple)
 	if err != nil {
 		return err

@@ -8,7 +8,7 @@ import (
 	"github.com/tuannm99/novasql/internal/storage"
 )
 
-func WritePage(path string, p *storage.Page) error {
+func writePage(path string, p *storage.Page) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
@@ -25,7 +25,7 @@ func WritePage(path string, p *storage.Page) error {
 	return f.Sync() // đảm bảo flush qua kernel buffers
 }
 
-func ReadPage(path string, pageID uint32) (*storage.Page, error) {
+func readPage(path string, pageID uint32) (*storage.Page, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -42,21 +42,19 @@ func ReadPage(path string, pageID uint32) (*storage.Page, error) {
 	// hãy wrap bằng &storage.Page{Buf: buf} thay vì NewPage (NewPage sẽ gọi init).
 }
 
-func main() {
-	// Tạo page rỗng, pageID=0
+func Persists() {
+	// TODO: should use StorageManager for File I/O
 	buf := make([]byte, storage.PageSize)
 	p, err := storage.NewPage(buf, 0)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Ghi xuống file
-	if err := WritePage("data.rel", p); err != nil {
+	if err := writePage("data.rel", p); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println(p)
 
-	// Đọc lại và in 16 byte đầu dưới dạng hex
 	f, _ := os.Open("data.rel")
 	defer f.Close()
 	h := make([]byte, 8192)

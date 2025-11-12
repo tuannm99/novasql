@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/tuannm99/novasql/internal/storage"
 )
@@ -16,13 +15,7 @@ func must(okSlot int, err error) int {
 	return okSlot
 }
 
-func main() {
-	buf := make([]byte, storage.PageSize)
-	p, err := storage.NewPage(buf, 0)
-	if err != nil {
-		log.Fatal(err)
-	}
-
+func insert(p *storage.Page) {
 	// 1) chuỗi (UTF-8)
 	_ = must(p.InsertTuple([]byte("chuỗi tuannm99")))
 
@@ -37,12 +30,25 @@ func main() {
 
 	// 5) số 256 -> 2 byte LE: 0x00 0x01
 	_ = must(p.InsertTuple([]byte{0x00, 0x01}))
-	// hoặc dùng encoding/binary:
+	// or encoding/binary:
 	b2 := make([]byte, 2)
 	binary.LittleEndian.PutUint16(b2, 256)
 	_ = must(p.InsertTuple(b2))
+}
 
-	// In debug ra stdout (hoặc: fmt.Println(p.DebugString()))
-	p.Debug(os.Stdout)
-	fmt.Println()
+func main() {
+	buf := make([]byte, storage.PageSize)
+	p, err := storage.NewPage(buf, 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	insert(p)
+	fmt.Println(p.DebugString())
+
+	// check data
+	for i := range 6 {
+		byteData, _ := p.ReadTuple(i)
+		fmt.Println("slot - bytedata")
+		fmt.Println(i, byteData)
+	}
 }
