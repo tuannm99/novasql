@@ -6,15 +6,16 @@ import (
 )
 
 const (
-	OneB  = 1
-	OneKB = 1024
-	OneMB = OneKB * 1024
-	OneGB = OneMB * 1024
+	OneB  = 1 << 0  // 1
+	OneKB = 1 << 10 // 1,024
+	OneMB = 1 << 20 // 1,048,576
+	OneGB = 1 << 30 // 1,073,741,824
 
-	SegmentSize = 1 << 30 // 1 GiB
-	PageSize    = OneKB * 8
-	HeaderSize  = 12
-	SlotSize    = 6 // 3 * uint16 (offset, length, flags)
+	SegmentSize       = 1 << 30                // 1,073,741,824 (1 GiB)
+	PageSize          = 1 << 13                // 8,192 (8 KiB)
+	MaxPagePerSegment = SegmentSize / PageSize // 131,072 pages/segment
+	HeaderSize        = 12                     // 12
+	SlotSize          = 6                      // 6 (3 * uint16: offset, length, flags)
 )
 
 const (
