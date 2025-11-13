@@ -51,4 +51,10 @@ func main() {
 		fmt.Println("slot - bytedata")
 		fmt.Println(i, byteData)
 	}
+
+	_ = p.UpdateTuple(0, []byte("updated chuỗi tuannm99"))
+	fmt.Println(p.DebugString())
+
+	_ = p.DeleteTuple(0)
+	fmt.Println(p.DebugString())
 }
