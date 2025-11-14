@@ -138,7 +138,8 @@ func (p *Page) putSlot(idx int, s Slot) error {
 
 func (p *Page) appendSlot(off, length, flags uint16) (int, error) {
 	i := p.NumSlots()
-	if err := p.putSlot(i, Slot{Offset: off, Length: length, Flags: flags}); err != nil {
+	newSlot := Slot{Offset: off, Length: length, Flags: flags}
+	if err := p.putSlot(i, newSlot); err != nil {
 		return -1, err
 	}
 	p.setLower(p.lower() + SlotSize)
@@ -169,35 +170,33 @@ func (p *Page) ReadTuple(slot int) ([]byte, error) {
 			return nil, err
 		}
 
-		switch s.Flags {
-		case SlotFlagNormal:
-			if s.Offset == 0 || s.Length == 0 {
-				return nil, ErrCorruption
-			}
-			start, end := int(s.Offset), int(s.Offset)+int(s.Length)
-			if start < 0 || start < int(p.upper()) || end > PageSize || start >= end {
-				return nil, ErrCorruption
-			}
-			return p.Buf[start:end], nil
-
-		case SlotFlagMoved:
-			// follow redirect to the target slot on the same page
+		if s.Flags == SlotFlagMoved {
 			if s.Length != 0 || s.Offset == 0 {
 				return nil, ErrCorruption
 			}
 			slot = int(s.Offset)
 			visited++
-			// prevent pathological redirect loops
 			if visited > p.NumSlots() {
 				return nil, ErrCorruption
 			}
+			continue
+		}
 
-		case SlotFlagDeleted:
+		if s.Flags == SlotFlagDeleted {
 			return nil, ErrBadSlot
-
-		default:
+		}
+		if s.Flags != SlotFlagNormal {
 			return nil, ErrCorruption
 		}
+
+		if s.Offset == 0 || s.Length == 0 {
+			return nil, ErrCorruption
+		}
+		start, end := int(s.Offset), int(s.Offset)+int(s.Length)
+		if start < 0 || start < int(p.upper()) || end > PageSize || start >= end {
+			return nil, ErrCorruption
+		}
+		return p.Buf[start:end], nil
 	}
 }
 

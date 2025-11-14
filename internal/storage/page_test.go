@@ -3,25 +3,58 @@ package storage
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	// "github.com/tuannm99/novasql/internal/storage"
 )
 
 var (
-	defaultPageSize int = PageSize
-	defaultPageID       = 0
-	defaultUpper        = 8192
-	defaultLower        = 12
-	defaultNumSlots     = 0
+	defaultPageID = 0
+
+	slot1Data = []byte("data string of slot 1")
+	slot2Data = []byte("data string of slot 2")
 )
 
-func TestNewPage_init(t *testing.T) {
-	buf := make([]byte, defaultPageSize)
-	p, err := NewPage(buf, uint32(defaultPageID))
+func newPage(t *testing.T) *Page {
+	buf := make([]byte, PageSize)
 
+	p, err := NewPage(buf, uint32(defaultPageID))
 	require.NoError(t, err)
-	t.Log(p.Buf)
-	require.Equal(t, uint16(defaultUpper), p.upper())
-	require.Equal(t, uint16(defaultLower), p.lower())
-	require.Equal(t, defaultNumSlots, p.NumSlots())
+
+	// default after init page
+	assert.Equal(t, uint16(PageSize), p.upper())
+	assert.Equal(t, uint16(HeaderSize), p.lower())
+	assert.Equal(t, 0, p.NumSlots())
+
+	var slot int
+
+	slot, err = p.InsertTuple(slot1Data)
+	require.NoError(t, err)
+	assert.Equal(t, 0, slot)
+
+	slot, err = p.InsertTuple(slot2Data)
+	require.NoError(t, err)
+	assert.Equal(t, 1, slot)
+
+	// after inserting two tuples
+	assert.Equal(t, uint16(0x1fd6), p.upper())
+	assert.Equal(t, uint16(0x18), p.lower())
+	assert.Equal(t, 2, p.NumSlots())
+
+	require.NotNil(t, p.DebugString())
+
+	return p
 }
+
+func TestReadTuple(t *testing.T) {
+	p := newPage(t)
+	byteData, err := p.ReadTuple(0)
+	require.NoError(t, err)
+
+	assert.Equal(t, slot1Data, byteData)
+}
+
+// func TestUpdateTuple(t *testing.T) {
+// }
+//
+// func TestDeleteTuple(t *testing.T) {
+// }
