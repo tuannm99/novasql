@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/tuannm99/novasql"
 	"github.com/tuannm99/novasql/internal"
+	"github.com/tuannm99/novasql/internal/engine"
 	"github.com/tuannm99/novasql/internal/storage"
 )
 
@@ -23,21 +23,7 @@ func main() {
 		log.Fatalf("Failed to create data directory: %v", err)
 	}
 
-	storageMode, err := storage.GetStorageMode(cfg.Storage.Mode)
-	if err != nil {
-		panic(err)
-	}
-
-	db, err := novasql.NewDatabase(*workDir, storageMode)
-	if err != nil {
-		panic(err)
-	}
-
-	_, err = db.GetPage(1)
-	if err != nil {
-		panic(err)
-	}
-	// page.Deserialize()
+	engine.NewDatabase(cfg.Storage.File)
 
 	select {}
 }

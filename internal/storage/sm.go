@@ -62,7 +62,7 @@ func (sm *StorageManager) locate(pageID int32) (segNo int32, offset int32) {
 	segNo = pageID / int32(pps)
 	pageInSeg := pageID % int32(pps)
 	offset = pageInSeg * PageSize
-	return
+	return segNo, offset
 }
 
 // ReadPage reads exactly one page (PageSize bytes) into dst.

@@ -1,11 +1,14 @@
 package heap
 
-import "github.com/tuannm99/novasql/internal/storage"
+import (
+	"github.com/tuannm99/novasql/internal/record"
+	"github.com/tuannm99/novasql/internal/storage"
+)
 
 // Table là heap file logic: biết tên, schema, StorageManager, FileSet, PageCount.
 type Table struct {
 	Name      string
-	Schema    storage.Schema
+	Schema    record.Schema
 	SM        *storage.StorageManager
 	FS        storage.FileSet
 	PageCount uint32 // hiện tại giữ ở memory; TODO: persist ra meta
@@ -15,7 +18,7 @@ type Table struct {
 // pageCount ban đầu sẽ được engine truyền vào (VD đọc từ meta, hoặc 0 với table mới).
 func NewTable(
 	name string,
-	schema storage.Schema,
+	schema record.Schema,
 	sm *storage.StorageManager,
 	fs storage.FileSet,
 	pageCount uint32,
@@ -44,7 +47,7 @@ func (t *Table) Insert(values []any) (TID, error) {
 		if err != nil {
 			return TID{}, err
 		}
-		hp := HeapPage{Pg: p, Schema: t.Schema}
+		hp := HeapPage{Page: p, Schema: t.Schema}
 
 		slot, err := hp.InsertRow(values)
 		if err == storage.ErrNoSpace {
@@ -70,29 +73,29 @@ func (t *Table) Get(id TID) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	hp := HeapPage{Pg: p, Schema: t.Schema}
+	hp := HeapPage{Page: p, Schema: t.Schema}
 	return hp.ReadRow(int(id.Slot))
 }
 
 // Scan duyệt toàn bộ row (simple V1).
 // fn có thể là callback để user xử lý từng row.
 func (t *Table) Scan(fn func(id TID, row []any) error) error {
-	for pid := uint32(0); pid < t.PageCount; pid++ {
-		p, err := t.SM.LoadPage(t.FS, pid)
+	for pageID := uint32(0); pageID < t.PageCount; pageID++ {
+		p, err := t.SM.LoadPage(t.FS, pageID)
 		if err != nil {
 			return err
 		}
-		hp := HeapPage{Pg: p, Schema: t.Schema}
+		hp := HeapPage{Page: p, Schema: t.Schema}
 
 		// duyệt từng slot
-		for slot := 0; slot < hp.Pg.NumSlots(); slot++ {
+		for slot := 0; slot < hp.Page.NumSlots(); slot++ {
 			row, err := hp.ReadRow(slot)
 			if err != nil {
 				// Deleted / moved lỗi sẽ trả về ErrBadSlot/ErrCorruption – có thể chọn skip
 				// nhưng để đơn giản, cứ trả lỗi luôn.
 				return err
 			}
-			id := TID{PageID: pid, Slot: uint16(slot)}
+			id := TID{PageID: pageID, Slot: uint16(slot)}
 			if err := fn(id, row); err != nil {
 				return err
 			}

@@ -1,13 +1,13 @@
 package util
 
 import (
-	"fmt"
+	"log/slog"
 	"os"
 )
 
 func CloseFileFunc(f *os.File) {
 	err := f.Close()
 	if err != nil {
-		fmt.Println(err)
+		slog.Error("close file", "err", err)
 	}
 }

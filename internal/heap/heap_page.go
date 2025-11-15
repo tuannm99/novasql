@@ -1,29 +1,33 @@
 package heap
 
-import "github.com/tuannm99/novasql/internal/storage"
+import (
+	"github.com/tuannm99/novasql/internal/record"
+	"github.com/tuannm99/novasql/internal/storage"
+)
 
-// HeapPage = Page + Schema, thao tác ở mức row (values []any) thay vì []byte.
+// HeapPage = Page + Schema, Wrapper row-level on top of Page
+// operation on row (values []any) instead of raw []byte.
 type HeapPage struct {
-	Pg     *storage.Page
-	Schema storage.Schema
+	Page   *storage.Page
+	Schema record.Schema
 }
 
-func NewHeapPage(p *storage.Page, s storage.Schema) HeapPage {
-	return HeapPage{Pg: p, Schema: s}
+func NewHeapPage(p *storage.Page, s record.Schema) HeapPage {
+	return HeapPage{Page: p, Schema: s}
 }
 
 func (hp *HeapPage) InsertRow(values []any) (int, error) {
-	data, err := storage.EncodeRow(hp.Schema, values)
+	data, err := record.EncodeRow(hp.Schema, values)
 	if err != nil {
 		return -1, err
 	}
-	return hp.Pg.InsertTuple(data)
+	return hp.Page.InsertTuple(data)
 }
 
 func (hp *HeapPage) ReadRow(slot int) ([]any, error) {
-	data, err := hp.Pg.ReadTuple(slot)
+	data, err := hp.Page.ReadTuple(slot)
 	if err != nil {
 		return nil, err
 	}
-	return storage.DecodeRow(hp.Schema, data)
+	return record.DecodeRow(hp.Schema, data)
 }

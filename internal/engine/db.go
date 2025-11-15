@@ -6,6 +6,7 @@ import (
 
 	"github.com/tuannm99/novasql/internal/alias/util"
 	"github.com/tuannm99/novasql/internal/heap"
+	"github.com/tuannm99/novasql/internal/record"
 	"github.com/tuannm99/novasql/internal/storage"
 )
 
@@ -13,6 +14,13 @@ var (
 	ErrDatabaseClosed = errors.New("novasql: database is closed")
 	ErrInvalidPageID  = errors.New("novasql: invalid page ID")
 )
+
+type DatabaseOperation interface {
+	CreateTable(name string, schema record.Schema) (*heap.Table, error)
+	OpenTable(name string, schema record.Schema) (*heap.Table, error)
+}
+
+var _ DatabaseOperation = (*Database)(nil)
 
 type Database struct {
 	DataDir string
@@ -40,14 +48,14 @@ func (db *Database) tableFileSet(name string) storage.FileSet {
 
 // CreateTable: V1 – chỉ tạo handle, schema và đặt PageCount = 0.
 // TODO: ghi schema + pageCount ra meta file (JSON/YAML).
-func (db *Database) CreateTable(name string, schema storage.Schema) (*heap.Table, error) {
+func (db *Database) CreateTable(name string, schema record.Schema) (*heap.Table, error) {
 	fs := db.tableFileSet(name)
 	tbl := heap.NewTable(name, schema, db.SM, fs, 0)
 	return tbl, nil
 }
 
 // OpenTable: V1 – chưa có catalog, nên tạm tính PageCount từ kích thước segment 0.
-func (db *Database) OpenTable(name string, schema storage.Schema) (*heap.Table, error) {
+func (db *Database) OpenTable(name string, schema record.Schema) (*heap.Table, error) {
 	fs := db.tableFileSet(name)
 
 	// tạm thời chỉ xem segment 0:
