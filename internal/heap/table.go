@@ -1,16 +1,18 @@
 package heap
 
 import (
+	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/record"
 	"github.com/tuannm99/novasql/internal/storage"
 )
 
-// Table là heap file logic: biết tên, schema, StorageManager, FileSet, PageCount.
+// Table represent for heap file logic: name, schema, StorageManager, FileSet, PageCount.
 type Table struct {
 	Name      string
 	Schema    record.Schema
 	SM        *storage.StorageManager
 	FS        storage.FileSet
+	BP        bufferpool.Manager
 	PageCount uint32 // hiện tại giữ ở memory; TODO: persist ra meta
 }
 
@@ -21,6 +23,7 @@ func NewTable(
 	schema record.Schema,
 	sm *storage.StorageManager,
 	fs storage.FileSet,
+	bp bufferpool.Manager,
 	pageCount uint32,
 ) *Table {
 	return &Table{
@@ -28,78 +31,102 @@ func NewTable(
 		Schema:    schema,
 		SM:        sm,
 		FS:        fs,
+		BP:        bp,
 		PageCount: pageCount,
 	}
 }
 
-// Insert: V1 naive -> luôn ưu tiên page cuối, nếu đầy thì tạo page mới.
+// V1 naive -> always prefer last page, if page is full create new one
 func (t *Table) Insert(values []any) (TID, error) {
 	var pageID uint32
 	if t.PageCount == 0 {
 		pageID = 0
-		t.PageCount = 1 // table mới, sẽ khởi tạo page 0 lần đầu LoadPage
+		t.PageCount = 1 // first page will be created lazily
 	} else {
 		pageID = t.PageCount - 1
 	}
 
 	for {
-		p, err := t.SM.LoadPage(t.FS, pageID)
+		// Use buffer pool instead of StorageManager directly
+		p, err := t.BP.GetPage(pageID)
 		if err != nil {
 			return TID{}, err
 		}
+
 		hp := HeapPage{Page: p, Schema: t.Schema}
 
 		slot, err := hp.InsertRow(values)
 		if err == storage.ErrNoSpace {
-			// Page full -> thử tạo page mới
+			// Current page is full, unpin without dirty flag and try next page
+			_ = t.BP.Unpin(p, false)
+
 			pageID = t.PageCount
 			t.PageCount++
 			continue
 		}
 		if err != nil {
-			// Ví dụ ErrTupleTooLarge, ErrWrongSize, ...
+			// Unexpected error, unpin and return
+			_ = t.BP.Unpin(p, false)
 			return TID{}, err
 		}
-		if err := t.SM.SavePage(t.FS, pageID, *p); err != nil {
+
+		// Mark page as dirty because we just inserted a tuple
+		if err := t.BP.Unpin(p, true); err != nil {
 			return TID{}, err
 		}
+
 		return TID{PageID: pageID, Slot: uint16(slot)}, nil
 	}
 }
 
-// Get đọc một row theo TID (pageID, slot).
+// Get reads a single row by TID.
 func (t *Table) Get(id TID) ([]any, error) {
-	p, err := t.SM.LoadPage(t.FS, id.PageID)
+	// Use buffer pool to get the page
+	p, err := t.BP.GetPage(id.PageID)
 	if err != nil {
 		return nil, err
 	}
+
 	hp := HeapPage{Page: p, Schema: t.Schema}
-	return hp.ReadRow(int(id.Slot))
+	row, err := hp.ReadRow(int(id.Slot))
+
+	// Read-only: dirty = false
+	_ = t.BP.Unpin(p, false)
+
+	if err != nil {
+		return nil, err
+	}
+	return row, nil
 }
 
-// Scan duyệt toàn bộ row (simple V1).
-// fn có thể là callback để user xử lý từng row.
+// Scan iterates through all rows in the table.
 func (t *Table) Scan(fn func(id TID, row []any) error) error {
 	for pageID := uint32(0); pageID < t.PageCount; pageID++ {
-		p, err := t.SM.LoadPage(t.FS, pageID)
+		p, err := t.BP.GetPage(pageID)
 		if err != nil {
 			return err
 		}
+
 		hp := HeapPage{Page: p, Schema: t.Schema}
 
-		// duyệt từng slot
+		// Iterate through all slots in the page
 		for slot := 0; slot < hp.Page.NumSlots(); slot++ {
 			row, err := hp.ReadRow(slot)
 			if err != nil {
-				// Deleted / moved lỗi sẽ trả về ErrBadSlot/ErrCorruption – có thể chọn skip
-				// nhưng để đơn giản, cứ trả lỗi luôn.
+				// For simplicity we propagate the error;
+				// later we may want to skip deleted/moved slots.
+				_ = t.BP.Unpin(p, false)
 				return err
 			}
 			id := TID{PageID: pageID, Slot: uint16(slot)}
 			if err := fn(id, row); err != nil {
+				_ = t.BP.Unpin(p, false)
 				return err
 			}
 		}
+
+		// Page was only read in Scan, not modified.
+		_ = t.BP.Unpin(p, false)
 	}
 	return nil
 }

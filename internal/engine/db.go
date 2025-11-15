@@ -1,10 +1,14 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
+	"log/slog"
+	"os"
 	"path/filepath"
+	"time"
 
-	"github.com/tuannm99/novasql/internal/alias/util"
+	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/heap"
 	"github.com/tuannm99/novasql/internal/record"
 	"github.com/tuannm99/novasql/internal/storage"
@@ -17,7 +21,16 @@ var (
 
 type DatabaseOperation interface {
 	CreateTable(name string, schema record.Schema) (*heap.Table, error)
-	OpenTable(name string, schema record.Schema) (*heap.Table, error)
+	OpenTable(name string) (*heap.Table, error)
+	Close() error
+}
+
+type TableMeta struct {
+	Name      string        `json:"name"`
+	Schema    record.Schema `json:"schema"`
+	PageCount uint32        `json:"page_count"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
 }
 
 var _ DatabaseOperation = (*Database)(nil)
@@ -36,46 +49,129 @@ func NewDatabase(dataDir string) *Database {
 	}
 }
 
+func (db *Database) tableDir() string {
+	return filepath.Join(db.DataDir, "tables")
+}
+
+func (db *Database) tableMetaPath(name string) string {
+	return filepath.Join(db.tableDir(), name+".meta.json")
+}
+
 // helper: trả về FileSet cho 1 table name
 func (db *Database) tableFileSet(name string) storage.FileSet {
-	// ví dụ: data/tables/<name>
-	dir := filepath.Join(db.DataDir, "tables")
 	return storage.LocalFileSet{
-		Dir:  dir,
+		Dir:  db.tableDir(),
 		Base: name,
 	}
 }
 
-// CreateTable: V1 – chỉ tạo handle, schema và đặt PageCount = 0.
-// TODO: ghi schema + pageCount ra meta file (JSON/YAML).
+// writeTableMeta overwrites the meta file for a given table.
+func (db *Database) writeTableMeta(meta *TableMeta) error {
+	path := db.tableMetaPath(meta.Name)
+
+	if err := os.MkdirAll(db.tableDir(), 0o755); err != nil {
+		return err
+	}
+
+	meta.UpdatedAt = time.Now()
+
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// readTableMeta loads table metadata from JSON file.
+func (db *Database) readTableMeta(name string) (*TableMeta, error) {
+	path := db.tableMetaPath(name)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var meta TableMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
 func (db *Database) CreateTable(name string, schema record.Schema) (*heap.Table, error) {
 	fs := db.tableFileSet(name)
-	tbl := heap.NewTable(name, schema, db.SM, fs, 0)
+	bp := bufferpool.NewPool(db.SM, fs, bufferpool.DefaultCapacity)
+
+	meta := &TableMeta{
+		Name:      name,
+		Schema:    schema,
+		PageCount: 0,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := db.writeTableMeta(meta); err != nil {
+		return nil, err
+	}
+
+	tbl := heap.NewTable(name, schema, db.SM, fs, bp, 0)
 	return tbl, nil
 }
 
-// OpenTable: V1 – chưa có catalog, nên tạm tính PageCount từ kích thước segment 0.
-func (db *Database) OpenTable(name string, schema record.Schema) (*heap.Table, error) {
+func (db *Database) OpenTable(name string) (*heap.Table, error) {
 	fs := db.tableFileSet(name)
 
-	// tạm thời chỉ xem segment 0:
-	f, err := fs.OpenSegment(0)
+	meta, err := db.readTableMeta(name)
 	if err != nil {
 		return nil, err
 	}
-	defer util.CloseFileFunc(f)
 
-	info, err := f.Stat()
+	// Count pages on disk as the single source of truth.
+	pageCount, err := db.SM.CountPages(fs)
 	if err != nil {
 		return nil, err
 	}
-	size := info.Size()
-	if size < 0 {
-		size = 0
+
+	// Refresh meta PageCount snapshot.
+	meta.PageCount = pageCount
+	meta.UpdatedAt = time.Now()
+
+	// Best-effort update; if this fails, we still can open the table.
+	err = db.writeTableMeta(meta)
+	if err != nil {
+		slog.Info("open table:: error write table meta", "err", err)
 	}
 
-	// mỗi page = PageSize bytes
-	pageCount := uint32(size / int64(storage.PageSize))
-	tbl := heap.NewTable(name, schema, db.SM, fs, pageCount)
+	bp := bufferpool.NewPool(db.SM, fs, bufferpool.DefaultCapacity)
+
+	tbl := heap.NewTable(name, meta.Schema, db.SM, fs, bp, pageCount)
 	return tbl, nil
+}
+
+func (db *Database) Close() error {
+	// TODO: later - flush all tables' buffer pools
+	return nil
+}
+
+// Not supported yet!!! -> Not have update schema operation like ALTER
+// UpdateTableSchema rewrites the table meta with a new schema definition.
+func (db *Database) UpdateTableSchema(name string, newSchema record.Schema) error {
+	meta, err := db.readTableMeta(name)
+	if err != nil {
+		return err
+	}
+
+	meta.Schema = newSchema
+	meta.UpdatedAt = time.Now()
+
+	return db.writeTableMeta(meta)
+}
+
+// Table meta only need to update page count or schema changed
+func (db *Database) SyncTableMetaPageCount(tbl *heap.Table) error {
+	meta, err := db.readTableMeta(tbl.Name)
+	if err != nil {
+		return err
+	}
+	meta.PageCount = tbl.PageCount
+	return db.writeTableMeta(meta)
 }
