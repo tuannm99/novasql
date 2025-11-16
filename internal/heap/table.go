@@ -1,8 +1,6 @@
 package heap
 
 import (
-	"errors"
-
 	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/record"
 	"github.com/tuannm99/novasql/internal/storage"
@@ -127,8 +125,9 @@ func (t *Table) Delete(id TID) error {
 	return err
 }
 
-// Scan iterates through all visible rows in the table and calls fn for each.
-// Deleted slots are skipped.
+// Scan iterates through all visible rows in the table.
+// It skips deleted and moved slots so that each logical row
+// is returned exactly once.
 func (t *Table) Scan(fn func(id TID, row []any) error) error {
 	for pageID := uint32(0); pageID < t.PageCount; pageID++ {
 		p, err := t.BP.GetPage(pageID)
@@ -139,13 +138,20 @@ func (t *Table) Scan(fn func(id TID, row []any) error) error {
 		hp := HeapPage{Page: p, Schema: t.Schema}
 
 		for slot := 0; slot < hp.Page.NumSlots(); slot++ {
+			live, err := hp.Page.IsLiveSlot(slot)
+			if err != nil {
+				_ = t.BP.Unpin(p, false)
+				return err
+			}
+			if !live {
+				// skip deleted / moved / invalid slots
+				continue
+			}
+
 			row, err := hp.ReadRow(slot)
 			if err != nil {
-				// Skip deleted/invalid slots
-				if errors.Is(err, storage.ErrBadSlot) {
-					continue
-				}
-				// Other errors are serious (corruption, IO...) -> abort
+				// At this point, IsLiveSlot says slot is NORMAL,
+				// so any error is likely serious (corruption).
 				_ = t.BP.Unpin(p, false)
 				return err
 			}
@@ -157,8 +163,11 @@ func (t *Table) Scan(fn func(id TID, row []any) error) error {
 			}
 		}
 
-		// Page was only read in Scan, not modified.
 		_ = t.BP.Unpin(p, false)
 	}
 	return nil
+}
+
+func (t *Table) Flush() error {
+	return t.BP.FlushAll()
 }

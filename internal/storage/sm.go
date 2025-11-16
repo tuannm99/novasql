@@ -137,30 +137,44 @@ func (sm *StorageManager) SavePage(fs FileSet, pageID uint32, p Page) error {
 	return sm.WritePage(fs, int32(pageID), p.Buf)
 }
 
-// CountPages computes total pages for a given FileSet by scanning all segments.
 func (sm *StorageManager) CountPages(fs FileSet) (uint32, error) {
+	// Special-case LocalFileSet because its OpenSegment will create files.
+	if lfs, ok := fs.(LocalFileSet); ok {
+		return countPagesLocalFileSet(lfs)
+	}
+
+	// For other FileSet implementations (if any in future) we could either:
+	// - extend the FileSet interface with a StatSegment method, or
+	// - return 0 for now.
+	return 0, nil
+}
+
+func countPagesLocalFileSet(lfs LocalFileSet) (uint32, error) {
 	var total uint32
 
-	// We assume segments are named: Base, Base.1, Base.2, ...
+	// Ensure directory exists; if not, we consider there are no segments.
+	if err := os.MkdirAll(lfs.Dir, 0o755); err != nil {
+		return 0, err
+	}
+
 	for segNo := int32(0); ; segNo++ {
-		f, err := fs.OpenSegment(segNo)
+		name := lfs.Base
+		if segNo > 0 {
+			name = fmt.Sprintf("%s.%d", lfs.Base, segNo)
+		}
+		path := filepath.Join(lfs.Dir, name)
+
+		info, err := os.Stat(path)
 		if err != nil {
-			// Stop when the segment file does not exist
 			if os.IsNotExist(err) {
+				// First missing segment => stop scanning
 				break
 			}
 			return 0, err
 		}
 
-		info, statErr := f.Stat()
-		_ = f.Close()
-		if statErr != nil {
-			return 0, statErr
-		}
-
 		size := info.Size()
 		if size <= 0 {
-			// Empty segment – no pages here
 			continue
 		}
 

@@ -33,4 +33,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Scan: %v", err)
 	}
+
+	fmt.Println("Try Get on old TID (PageID=0, Slot=0):")
+	oldID := heap.TID{PageID: 0, Slot: 0}
+	row, err := tbl.Get(oldID)
+	if err != nil {
+		log.Printf("Get old TID error: %v", err)
+	} else {
+		fmt.Printf("Old TID=%+v row=%#v\n", oldID, row)
+	}
 }

@@ -146,6 +146,37 @@ func (p *Page) appendSlot(off, length, flags uint16) (int, error) {
 	return i, nil
 }
 
+// IsLiveSlot reports whether the slot at the given index currently holds
+// a visible (normal) tuple. Deleted or moved slots are treated as not live.
+func (p *Page) IsLiveSlot(idx int) (bool, error) {
+	s, err := p.getSlot(idx)
+	if err != nil {
+		// If slot index is out of range or corrupted, treat as not live
+		// but bubble up serious errors if needed.
+		if err == ErrBadSlot {
+			return false, nil
+		}
+		return false, err
+	}
+
+	// Skip non-normal slots (deleted, moved, etc).
+	if s.Flags != SlotFlagNormal {
+		return false, nil
+	}
+	if s.Offset == 0 || s.Length == 0 {
+		return false, nil
+	}
+
+	// Bounds checking for safety.
+	start := int(s.Offset)
+	end := start + int(s.Length)
+	if start < 0 || end > PageSize || start >= end {
+		return false, ErrCorruption
+	}
+
+	return true, nil
+}
+
 // ---- tuples (payload) ----
 func (p *Page) InsertTuple(tup []byte) (slot int, err error) {
 	maxInline := PageSize - HeaderSize - SlotSize

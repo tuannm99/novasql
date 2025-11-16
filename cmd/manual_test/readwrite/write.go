@@ -96,5 +96,10 @@ func main() {
 		log.Fatalf("Scan: %v", err)
 	}
 
+	// Ensure all dirty pages are persisted to disk.
+	if err := tbl.Flush(); err != nil {
+		log.Fatalf("Flush: %v", err)
+	}
+
 	fmt.Println("Writer finished. Now you can run the reader script.")
 }
