@@ -5,7 +5,8 @@ import (
 	"github.com/tuannm99/novasql/internal/storage"
 )
 
-// HeapPage = Page + Schema, Wrapper row-level on top of Page
+// HeapPage = Page + Schema, Wrapper for row-level action on top of Page,
+// adding record decode/endcode each operation
 // operation on row (values []any) instead of raw []byte.
 type HeapPage struct {
 	Page   *storage.Page
@@ -30,4 +31,16 @@ func (hp *HeapPage) ReadRow(slot int) ([]any, error) {
 		return nil, err
 	}
 	return record.DecodeRow(hp.Schema, data)
+}
+
+func (hp *HeapPage) UpdateRow(slot int, values []any) error {
+	data, err := record.EncodeRow(hp.Schema, values)
+	if err != nil {
+		return err
+	}
+	return hp.Page.UpdateTuple(slot, data)
+}
+
+func (hp *HeapPage) DeleteRow(slot int) error {
+	return hp.Page.DeleteTuple(slot)
 }

@@ -1,6 +1,8 @@
 package heap
 
 import (
+	"errors"
+
 	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/record"
 	"github.com/tuannm99/novasql/internal/storage"
@@ -13,11 +15,9 @@ type Table struct {
 	SM        *storage.StorageManager
 	FS        storage.FileSet
 	BP        bufferpool.Manager
-	PageCount uint32 // hiện tại giữ ở memory; TODO: persist ra meta
+	PageCount uint32
 }
 
-// NewTable: tạo handle Table (không tạo file).
-// pageCount ban đầu sẽ được engine truyền vào (VD đọc từ meta, hoặc 0 với table mới).
 func NewTable(
 	name string,
 	schema record.Schema,
@@ -99,7 +99,36 @@ func (t *Table) Get(id TID) ([]any, error) {
 	return row, nil
 }
 
-// Scan iterates through all rows in the table.
+// Update updates a single row identified by TID.
+func (t *Table) Update(id TID, values []any) error {
+	// For now we assume single-threaded usage; no table-level lock.
+	p, err := t.BP.GetPage(id.PageID)
+	if err != nil {
+		return err
+	}
+	hp := HeapPage{Page: p, Schema: t.Schema}
+
+	err = hp.UpdateRow(int(id.Slot), values)
+	// Page modified => dirty
+	_ = t.BP.Unpin(p, err == nil)
+	return err
+}
+
+// Delete marks a single row identified by TID as deleted.
+func (t *Table) Delete(id TID) error {
+	p, err := t.BP.GetPage(id.PageID)
+	if err != nil {
+		return err
+	}
+	hp := HeapPage{Page: p, Schema: t.Schema}
+
+	err = hp.DeleteRow(int(id.Slot))
+	_ = t.BP.Unpin(p, err == nil)
+	return err
+}
+
+// Scan iterates through all visible rows in the table and calls fn for each.
+// Deleted slots are skipped.
 func (t *Table) Scan(fn func(id TID, row []any) error) error {
 	for pageID := uint32(0); pageID < t.PageCount; pageID++ {
 		p, err := t.BP.GetPage(pageID)
@@ -109,15 +138,18 @@ func (t *Table) Scan(fn func(id TID, row []any) error) error {
 
 		hp := HeapPage{Page: p, Schema: t.Schema}
 
-		// Iterate through all slots in the page
 		for slot := 0; slot < hp.Page.NumSlots(); slot++ {
 			row, err := hp.ReadRow(slot)
 			if err != nil {
-				// For simplicity we propagate the error;
-				// later we may want to skip deleted/moved slots.
+				// Skip deleted/invalid slots
+				if errors.Is(err, storage.ErrBadSlot) {
+					continue
+				}
+				// Other errors are serious (corruption, IO...) -> abort
 				_ = t.BP.Unpin(p, false)
 				return err
 			}
+
 			id := TID{PageID: pageID, Slot: uint16(slot)}
 			if err := fn(id, row); err != nil {
 				_ = t.BP.Unpin(p, false)
