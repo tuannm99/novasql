@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"log/slog"
+	"os"
 	"path/filepath"
 
 	"github.com/tuannm99/novasql/internal/engine"
@@ -10,6 +12,11 @@ import (
 )
 
 func main() {
+	level := slog.LevelDebug
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+
 	dataDir := filepath.Join("data/test", "manual_db")
 
 	db := engine.NewDatabase(dataDir)

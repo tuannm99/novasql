@@ -1,7 +1,7 @@
 package btree
 
 import (
-	"github.com/tuannm99/novasql/internal/alias/bx"
+	"github.com/tuannm99/novasql/pkg/bx"
 	"github.com/tuannm99/novasql/internal/heap"
 )
 

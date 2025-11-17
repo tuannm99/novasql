@@ -36,12 +36,15 @@ func TestPool_GetPage_LoadsAndPins(t *testing.T) {
 	pool, cleanup := newTestPool(t, 4)
 	defer cleanup()
 
-	// First GetPage should load from disk and add one frame.
+	// First GetPage should load from disk and put it in a frame.
 	page1, err := pool.GetPage(0)
 	require.NoError(t, err)
 	require.NotNil(t, page1)
 	require.Equal(t, uint32(0), page1.PageID())
-	require.Len(t, pool.frames, 1)
+
+	// frames slice is fixed-size == capacity, but only index 0 is used now.
+	require.Len(t, pool.frames, pool.capacity)
+	require.NotNil(t, pool.frames[0])
 
 	frame := pool.frames[0]
 	require.Equal(t, uint32(0), frame.PageID)
@@ -59,11 +62,15 @@ func TestPool_GetPage_Full_NoFreeFrameError(t *testing.T) {
 	pool, cleanup := newTestPool(t, 1)
 	defer cleanup()
 
+	// frames has size == capacity from the beginning.
+	require.Len(t, pool.frames, pool.capacity)
+
 	// Fill the only frame with page 0 and keep it pinned.
 	page0, err := pool.GetPage(0)
 	require.NoError(t, err)
 	require.NotNil(t, page0)
 	require.Len(t, pool.frames, 1)
+	require.NotNil(t, pool.frames[0])
 	require.Equal(t, int32(1), pool.frames[0].Pin)
 
 	// Try to get a different page without unpinning the first one -> no free frame.
@@ -154,9 +161,93 @@ func TestNewPool_DefaultCapacity(t *testing.T) {
 
 	pool := NewPool(sm, fs, 0)
 	require.Equal(t, 16, pool.capacity)
+	require.Len(t, pool.frames, pool.capacity)
 
 	// Sanity: can still use the pool.
 	page, err := pool.GetPage(0)
 	require.NoError(t, err)
 	require.NotNil(t, page)
+}
+
+// New tests for DeletePageFromBuffer & free slot reuse.
+
+func TestPool_DeletePageFromBuffer_Unpinned(t *testing.T) {
+	pool, cleanup := newTestPool(t, 2)
+	defer cleanup()
+
+	// Load a page
+	page0, err := pool.GetPage(0)
+	require.NoError(t, err)
+	require.NotNil(t, page0)
+
+	idx, ok := pool.pageTable[0]
+	require.True(t, ok)
+	require.NotNil(t, pool.frames[idx])
+	require.Equal(t, int32(1), pool.frames[idx].Pin)
+
+	// Unpin then delete from buffer
+	require.NoError(t, pool.Unpin(page0, false))
+	require.Equal(t, int32(0), pool.frames[idx].Pin)
+
+	err = pool.DeletePageFromBuffer(0)
+	require.NoError(t, err)
+
+	// Mapping should be removed and frame slot freed (nil)
+	_, ok = pool.pageTable[0]
+	require.False(t, ok)
+	require.Nil(t, pool.frames[idx])
+}
+
+func TestPool_DeletePageFromBuffer_Pinned_ReturnsError(t *testing.T) {
+	pool, cleanup := newTestPool(t, 2)
+	defer cleanup()
+
+	// Load page 0 and keep it pinned
+	page0, err := pool.GetPage(0)
+	require.NoError(t, err)
+	require.NotNil(t, page0)
+
+	idx, ok := pool.pageTable[0]
+	require.True(t, ok)
+	require.NotNil(t, pool.frames[idx])
+	require.Equal(t, int32(1), pool.frames[idx].Pin)
+
+	err = pool.DeletePageFromBuffer(0)
+	require.ErrorIs(t, err, ErrPagePinned)
+
+	// Frame and mapping should remain unchanged
+	idx2, ok := pool.pageTable[0]
+	require.True(t, ok)
+	require.Equal(t, idx, idx2)
+	require.NotNil(t, pool.frames[idx2])
+	require.Equal(t, int32(1), pool.frames[idx2].Pin)
+}
+
+func TestPool_ReusesFreedFrameSlot(t *testing.T) {
+	pool, cleanup := newTestPool(t, 2)
+	defer cleanup()
+
+	// Load page 0
+	page0, err := pool.GetPage(0)
+	require.NoError(t, err)
+	require.NotNil(t, page0)
+
+	idx0, ok := pool.pageTable[0]
+	require.True(t, ok)
+	require.Equal(t, 0, idx0)
+
+	require.NoError(t, pool.Unpin(page0, false))
+	require.NoError(t, pool.DeletePageFromBuffer(0))
+	require.Nil(t, pool.frames[idx0])
+
+	// Load page 1, got free slot (idx0)
+	page1, err := pool.GetPage(1)
+	require.NoError(t, err)
+	require.NotNil(t, page1)
+
+	idx1, ok := pool.pageTable[1]
+	require.True(t, ok)
+	require.Equal(t, idx0, idx1)
+	require.NotNil(t, pool.frames[idx1])
+	require.Equal(t, uint32(1), pool.frames[idx1].PageID)
 }

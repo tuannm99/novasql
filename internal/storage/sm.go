@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/tuannm99/novasql/internal/alias/util"
+	"github.com/tuannm99/novasql/pkg/util"
 )
 
 var (

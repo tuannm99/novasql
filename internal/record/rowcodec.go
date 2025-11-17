@@ -4,7 +4,7 @@ import (
 	"errors"
 	"math"
 
-	"github.com/tuannm99/novasql/internal/alias/bx"
+	"github.com/tuannm99/novasql/pkg/bx"
 )
 
 // ---- Errors ----

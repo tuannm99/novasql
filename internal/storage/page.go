@@ -3,7 +3,7 @@ package storage
 import (
 	"errors"
 
-	"github.com/tuannm99/novasql/internal/alias/bx"
+	"github.com/tuannm99/novasql/pkg/bx"
 )
 
 // Fixed Header offsets
