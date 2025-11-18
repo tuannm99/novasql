@@ -13,7 +13,7 @@ import (
 	"github.com/tuannm99/novasql/internal/storage"
 )
 
-func newTestHeapTable(t *testing.T) (*heap.Table, *storage.StorageManager, storage.FileSet) {
+func newTestHeapTable(t *testing.T) (*heap.Table, *storage.StorageManager, storage.LocalFileSet) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -32,7 +32,13 @@ func newTestHeapTable(t *testing.T) (*heap.Table, *storage.StorageManager, stora
 		},
 	}
 
-	tbl := heap.NewTable("users", schema, sm, fs, bp, 0)
+	overflowFS := storage.LocalFileSet{
+		Dir:  fs.Dir,
+		Base: fs.Base + "_ovf",
+	}
+	ovf := storage.NewOverflowManager(sm, overflowFS)
+
+	tbl := heap.NewTable("users", schema, sm, fs, bp, ovf, 0)
 	return tbl, sm, fs
 }
 

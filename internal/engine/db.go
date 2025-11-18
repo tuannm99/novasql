@@ -41,7 +41,7 @@ type Database struct {
 	// TODO: catalog, bufferpool, locks, ...
 }
 
-// NewDatabase khởi tạo handle, chưa tạo file.
+// NewDatabase creates a new database handle without touching the filesystem.
 func NewDatabase(dataDir string) *Database {
 	return &Database{
 		DataDir: dataDir,
@@ -57,7 +57,7 @@ func (db *Database) tableMetaPath(name string) string {
 	return filepath.Join(db.tableDir(), name+".meta.json")
 }
 
-// helper: trả về FileSet cho 1 table name
+// helper: return FileSet for a given table name.
 func (db *Database) tableFileSet(name string) storage.FileSet {
 	return storage.LocalFileSet{
 		Dir:  db.tableDir(),
@@ -113,7 +113,15 @@ func (db *Database) CreateTable(name string, schema record.Schema) (*heap.Table,
 		return nil, err
 	}
 
-	tbl := heap.NewTable(name, schema, db.SM, fs, bp, 0)
+	// Overflow data for this table is stored in a separate fileset with a
+	// deterministic naming convention: "<table>_ovf".
+	overflowFS := storage.LocalFileSet{
+		Dir:  db.tableDir(),
+		Base: name + "_ovf",
+	}
+	ovf := storage.NewOverflowManager(db.SM, overflowFS)
+
+	tbl := heap.NewTable(name, schema, db.SM, fs, bp, ovf, 0)
 	return tbl, nil
 }
 
@@ -136,24 +144,31 @@ func (db *Database) OpenTable(name string) (*heap.Table, error) {
 	meta.UpdatedAt = time.Now()
 
 	// Best-effort update; if this fails, we still can open the table.
-	err = db.writeTableMeta(meta)
-	if err != nil {
+	if err := db.writeTableMeta(meta); err != nil {
 		slog.Info("open table:: error write table meta", "err", err)
 	}
 
 	bp := bufferpool.NewPool(db.SM, fs, bufferpool.DefaultCapacity)
 
-	tbl := heap.NewTable(name, meta.Schema, db.SM, fs, bp, pageCount)
+	// Rebuild the overflow manager for this table based on the same naming
+	// convention used in CreateTable.
+	overflowFS := storage.LocalFileSet{
+		Dir:  db.tableDir(),
+		Base: name + "_ovf",
+	}
+	ovf := storage.NewOverflowManager(db.SM, overflowFS)
+
+	tbl := heap.NewTable(name, meta.Schema, db.SM, fs, bp, ovf, pageCount)
 	return tbl, nil
 }
 
 func (db *Database) Close() error {
-	// TODO: later - flush all tables' buffer pools
+	// TODO: later - keep track of opened tables and flush all buffer pools.
 	return nil
 }
 
-// Not supported yet!!! -> Not have update schema operation like ALTER
-// UpdateTableSchema rewrites the table meta with a new schema definition.
+// Not supported yet: we do not have a real ALTER TABLE that rewrites data.
+// UpdateTableSchema only updates the meta file schema definition.
 func (db *Database) UpdateTableSchema(name string, newSchema record.Schema) error {
 	meta, err := db.readTableMeta(name)
 	if err != nil {
@@ -166,7 +181,7 @@ func (db *Database) UpdateTableSchema(name string, newSchema record.Schema) erro
 	return db.writeTableMeta(meta)
 }
 
-// Table meta only need to update page count or schema changed
+// SyncTableMetaPageCount updates the table meta when only PageCount changes.
 func (db *Database) SyncTableMetaPageCount(tbl *heap.Table) error {
 	meta, err := db.readTableMeta(tbl.Name)
 	if err != nil {

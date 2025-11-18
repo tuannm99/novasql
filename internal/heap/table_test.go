@@ -13,7 +13,7 @@ import (
 
 // newTestTable creates a new heap.Table bound to a temp directory and returns it
 // along with the underlying StorageManager and FileSet for reopen tests.
-func newTestTable(t *testing.T, base string) (*Table, *storage.StorageManager, storage.FileSet) {
+func newTestTable(t *testing.T, base string) (*Table, *storage.StorageManager, storage.LocalFileSet) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -34,8 +34,14 @@ func newTestTable(t *testing.T, base string) (*Table, *storage.StorageManager, s
 		},
 	}
 
+	overflowFS := storage.LocalFileSet{
+		Dir:  dir,
+		Base: base + "_ovf",
+	}
+	ovf := storage.NewOverflowManager(sm, overflowFS)
+
 	// New table with pageCount=0, Insert will lazily create pages.
-	tbl := NewTable(base, schema, sm, fs, bp, 0)
+	tbl := NewTable(base, schema, sm, fs, bp, ovf, 0)
 
 	return tbl, sm, fs
 }
@@ -73,7 +79,15 @@ func TestTable_InsertAndScan_Persisted(t *testing.T) {
 
 	bp2 := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
 	schema := tbl.Schema // reuse schema
-	tbl2 := NewTable("users", schema, sm, fs, bp2, pageCount)
+
+	// Rebuild overflow manager using the same naming convention.
+	overflowFS := storage.LocalFileSet{
+		Dir:  fs.Dir,
+		Base: fs.Base + "_ovf",
+	}
+	ovf := storage.NewOverflowManager(sm, overflowFS)
+
+	tbl2 := NewTable("users", schema, sm, fs, bp2, ovf, pageCount)
 
 	// Scan and reconstruct rows from disk.
 	got := make(map[int64]rowData)
@@ -135,9 +149,17 @@ func TestTable_UpdateRedirect_ScanAndGet(t *testing.T) {
 	// Reopen the table with a fresh buffer pool and page count from storage.
 	pageCount, err := sm.CountPages(fs)
 	require.NoError(t, err)
+
 	bp2 := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
 	schema := tbl.Schema
-	tbl2 := NewTable("users_update", schema, sm, fs, bp2, pageCount)
+
+	overflowFS := storage.LocalFileSet{
+		Dir:  fs.Dir,
+		Base: fs.Base + "_ovf",
+	}
+	ovf := storage.NewOverflowManager(sm, overflowFS)
+
+	tbl2 := NewTable("users_update", schema, sm, fs, bp2, ovf, pageCount)
 
 	// 1) Scan: we should see id=1 exactly once with updatedName.
 	foundIDs := make(map[int64]string)
@@ -189,9 +211,17 @@ func TestTable_DeleteAndScan(t *testing.T) {
 	// Reopen for reading.
 	pageCount, err := sm.CountPages(fs)
 	require.NoError(t, err)
+
 	bp2 := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
 	schema := tbl.Schema
-	tbl2 := NewTable("users_delete", schema, sm, fs, bp2, pageCount)
+
+	overflowFS := storage.LocalFileSet{
+		Dir:  fs.Dir,
+		Base: fs.Base + "_ovf",
+	}
+	ovf := storage.NewOverflowManager(sm, overflowFS)
+
+	tbl2 := NewTable("users_delete", schema, sm, fs, bp2, ovf, pageCount)
 
 	// Scan: id=3 should be missing, others present.
 	found := make(map[int64]bool)

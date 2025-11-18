@@ -14,6 +14,9 @@ type Table struct {
 	FS        storage.FileSet
 	BP        bufferpool.Manager
 	PageCount uint32
+
+	// overflow mgr for large values of this table
+	Overflow *storage.OverflowManager
 }
 
 func NewTable(
@@ -22,6 +25,7 @@ func NewTable(
 	sm *storage.StorageManager,
 	fs storage.FileSet,
 	bp bufferpool.Manager,
+	ovf *storage.OverflowManager,
 	pageCount uint32,
 ) *Table {
 	return &Table{
@@ -31,6 +35,7 @@ func NewTable(
 		FS:        fs,
 		BP:        bp,
 		PageCount: pageCount,
+		Overflow:  ovf,
 	}
 }
 
