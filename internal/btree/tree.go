@@ -48,6 +48,8 @@ func (t *Tree) Insert(key KeyType, tid heap.TID) error {
 	if err != nil {
 		return err
 	}
+
+	// We want to know whether insert succeeded to mark dirty.
 	defer func() {
 		_ = t.BP.Unpin(page, err == nil)
 	}()
@@ -56,7 +58,8 @@ func (t *Tree) Insert(key KeyType, tid heap.TID) error {
 	// Each entry is fixed LeafEntrySize bytes plus one Slot header.
 	need := LeafEntrySize + storage.SlotSize
 	if leaf.Page.FreeSpace() < need {
-		return ErrNodeFull
+		err = ErrNodeFull
+		return err
 	}
 
 	err = leaf.AppendEntry(key, tid)

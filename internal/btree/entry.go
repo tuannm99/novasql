@@ -1,8 +1,8 @@
 package btree
 
 import (
-	"github.com/tuannm99/novasql/pkg/bx"
 	"github.com/tuannm99/novasql/internal/heap"
+	"github.com/tuannm99/novasql/pkg/bx"
 )
 
 // KeyType represents the key type supported by this B-Tree.
