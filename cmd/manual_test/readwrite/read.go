@@ -12,10 +12,10 @@ import (
 )
 
 func main() {
-	level := slog.LevelDebug
-	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	logger := slog.New(handler)
-	slog.SetDefault(logger)
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	slog.SetDefault(slog.New(handler))
 
 	dataDir := filepath.Join("data/test", "manual_db")
 

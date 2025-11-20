@@ -44,7 +44,7 @@ func TestEncodeDecodeRow_RoundTrip(t *testing.T) {
 	require.Len(t, row, len(values))
 	require.Equal(t, int32(42), row[0].(int32))
 	require.Equal(t, int64(123456789), row[1].(int64))
-	require.Equal(t, true, row[2].(bool))
+	require.True(t, row[2].(bool))
 
 	// Float comparison with small epsilon
 	require.InDelta(t, 3.14159, row[3].(float64), 1e-9)
