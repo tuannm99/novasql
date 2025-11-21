@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 
+	"github.com/tuannm99/novasql"
 	"github.com/tuannm99/novasql/internal"
-	"github.com/tuannm99/novasql/internal/engine"
 	"github.com/tuannm99/novasql/internal/storage"
 )
 
@@ -23,7 +23,7 @@ func main() {
 		log.Fatalf("Failed to create data directory: %v", err)
 	}
 
-	engine.NewDatabase(cfg.Storage.File)
+	novasql.NewDatabase(cfg.Storage.File)
 
 	select {}
 }

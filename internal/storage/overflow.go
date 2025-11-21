@@ -54,7 +54,7 @@ func (ovf *OverflowManager) Write(data []byte) (OverflowRef, error) {
 	if err != nil {
 		return OverflowRef{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	total := len(data)
 	remaining := total
@@ -79,10 +79,7 @@ func (ovf *OverflowManager) Write(data []byte) (OverflowRef, error) {
 	curPageID := startPageID
 
 	for remaining > 0 {
-		chunk := remaining
-		if chunk > overflowPayloadSize {
-			chunk = overflowPayloadSize
-		}
+		chunk := min(remaining, overflowPayloadSize)
 
 		// Build a full page buffer.
 		buf := make([]byte, PageSize)
@@ -155,7 +152,7 @@ func (ovf *OverflowManager) Read(ref OverflowRef) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	slog.Debug("overflow: Read start",
 		"firstPageID", ref.FirstPageID,
@@ -221,4 +218,3 @@ func (ovf *OverflowManager) Read(ref OverflowRef) ([]byte, error) {
 
 	return out, nil
 }
-

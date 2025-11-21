@@ -22,11 +22,16 @@ var (
 
 // DatabaseOperation defines the high-level operations that a Database supports.
 type DatabaseOperation interface {
+	ListDatabase() ([]string, error)
+	SelectDatabase(name string) ([]string, error)
+	DropDatabase(name string) ([]string, error)
+
 	CreateTable(name string, schema record.Schema) (*heap.Table, error)
 	OpenTable(name string) (*heap.Table, error)
 	DropTable(name string) error
 	ListTables() ([]*TableMeta, error)
 	RenameTable(oldName, newName string) error
+
 	Close() error
 }
 
@@ -46,6 +51,21 @@ type Database struct {
 	DataDir string
 	SM      *storage.StorageManager
 	// TODO: catalog, shared buffer pool, lock manager, WAL manager, tx manager, ...
+}
+
+// DropDatabase implements DatabaseOperation.
+func (db *Database) DropDatabase(name string) ([]string, error) {
+	panic("unimplemented")
+}
+
+// ListDatabase implements DatabaseOperation.
+func (db *Database) ListDatabase() ([]string, error) {
+	panic("unimplemented")
+}
+
+// SelectDatabase implements DatabaseOperation.
+func (db *Database) SelectDatabase(name string) ([]string, error) {
+	panic("unimplemented")
 }
 
 // NewDatabase creates a new database handle without touching the filesystem.
