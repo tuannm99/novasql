@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tuannm99/novasql/internal/engine"
+	"github.com/tuannm99/novasql"
 	"github.com/tuannm99/novasql/internal/heap"
 	"github.com/tuannm99/novasql/internal/record"
 )
@@ -27,7 +27,7 @@ func main() {
 		log.Fatalf("create data dir: %v", err)
 	}
 
-	db := engine.NewDatabase(dataDir)
+	db := novasql.NewDatabase(dataDir)
 	defer func() {
 		if err := db.Close(); err != nil {
 			log.Printf("db close error: %v", err)
@@ -96,8 +96,8 @@ func main() {
 		}
 	}
 
-	// Each "Tuan" = 4 bytes; 3000 * 4 = 12000 bytes > 8KB page payload.
-	largeStr := strings.Repeat("Tuan", 3000)
+	// Each "Tuan" = 4 bytes; 7000 * 4  > 8KB page payload.
+	largeStr := strings.Repeat("Tuan", 7000)
 	slog.Info("building large row",
 		"len_large_str", len(largeStr),
 	)

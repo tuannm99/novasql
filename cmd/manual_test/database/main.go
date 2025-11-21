@@ -3,12 +3,12 @@ package main
 import (
 	"log/slog"
 
-	"github.com/tuannm99/novasql/internal/engine"
+	"github.com/tuannm99/novasql"
 	"github.com/tuannm99/novasql/internal/record"
 )
 
 func main() {
-	db := engine.NewDatabase("./data/test/schema")
+	db := novasql.NewDatabase("./data/test/schema")
 
 	schema := record.Schema{
 		Cols: []record.Column{

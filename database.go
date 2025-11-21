@@ -1,4 +1,4 @@
-package engine
+package novasql
 
 import (
 	"encoding/json"

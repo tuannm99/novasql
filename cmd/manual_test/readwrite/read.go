@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/tuannm99/novasql/internal/engine"
+	"github.com/tuannm99/novasql"
 	"github.com/tuannm99/novasql/internal/heap"
 )
 
@@ -19,7 +19,7 @@ func main() {
 
 	dataDir := filepath.Join("data/test", "manual_db")
 
-	db := engine.NewDatabase(dataDir)
+	db := novasql.NewDatabase(dataDir)
 	defer func() {
 		if err := db.Close(); err != nil {
 			log.Printf("db close error: %v", err)

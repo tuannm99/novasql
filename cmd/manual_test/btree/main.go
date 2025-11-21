@@ -5,9 +5,9 @@ import (
 	"log"
 	"path/filepath"
 
+	"github.com/tuannm99/novasql"
 	"github.com/tuannm99/novasql/internal/btree"
 	"github.com/tuannm99/novasql/internal/bufferpool"
-	"github.com/tuannm99/novasql/internal/engine"
 	"github.com/tuannm99/novasql/internal/record"
 	"github.com/tuannm99/novasql/internal/storage"
 )
@@ -15,7 +15,7 @@ import (
 func main() {
 	dataDir := filepath.Join("data", "test", "btree_db")
 
-	db := engine.NewDatabase(dataDir)
+	db := novasql.NewDatabase(dataDir)
 	defer db.Close()
 
 	schema := record.Schema{

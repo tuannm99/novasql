@@ -18,6 +18,14 @@ const (
 	ColBytes // opaque bytes
 )
 
+// ---- Errors ----
+var (
+	ErrSchemaMismatch  = errors.New("rowcodec: schema/values mismatch")
+	ErrBadBuffer       = errors.New("rowcodec: buffer underflow/overflow")
+	ErrVarTooLong      = errors.New("rowcodec: variable length exceeds u16")
+	ErrUnsupportedType = errors.New("rowcodec: unsupported type")
+)
+
 type Column struct {
 	Name     string
 	Type     ColumnType
@@ -30,13 +38,8 @@ type Schema struct {
 
 func (s Schema) NumCols() int { return len(s.Cols) }
 
-// ---- Errors ----
-var (
-	ErrSchemaMismatch  = errors.New("rowcodec: schema/values mismatch")
-	ErrBadBuffer       = errors.New("rowcodec: buffer underflow/overflow")
-	ErrVarTooLong      = errors.New("rowcodec: variable length exceeds u16")
-	ErrUnsupportedType = errors.New("rowcodec: unsupported type")
-)
+func (s Schema) Encode(values []any) ([]byte, error) { return EncodeRow(s, values) }
+func (s Schema) Decode(buf []byte) ([]any, error)    { return DecodeRow(s, buf) }
 
 // ---- EncodeRow(schema, values) -> []byte ----
 // Format:
