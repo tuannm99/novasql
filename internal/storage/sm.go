@@ -6,8 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-
-	"github.com/tuannm99/novasql/pkg/util"
 )
 
 var (
@@ -78,7 +76,7 @@ func (sm *StorageManager) ReadPage(fs FileSet, pageID int32, dst []byte) error {
 	if err != nil {
 		return err
 	}
-	defer util.CloseFileFunc(f)
+	defer func() { _ = f.Close() }()
 
 	n, err := f.ReadAt(dst, int64(off))
 	if err != nil && err != io.EOF {
@@ -102,7 +100,7 @@ func (sm *StorageManager) WritePage(fs FileSet, pageID int32, src []byte) error 
 	if err != nil {
 		return err
 	}
-	defer util.CloseFileFunc(f)
+	defer func() { _ = f.Close() }()
 
 	n, err := f.WriteAt(src, int64(off))
 	if err != nil {

@@ -101,7 +101,7 @@ func (t *Table) Get(id TID) ([]any, error) {
 		return nil, err
 	}
 	// Read-only access: always unpin with dirty=false
-	defer t.BP.Unpin(p, false)
+	defer func() { _ = t.BP.Unpin(p, false) }()
 
 	raw, err := p.ReadTuple(int(id.Slot))
 	if err != nil {

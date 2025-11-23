@@ -1,4 +1,4 @@
-version: '2'
+version: "2"
 
 run:
   timeout: 5m
@@ -11,9 +11,6 @@ linters:
     - staticcheck
     - ineffassign
     - unused
-    # - goimports
-    # - gosimple
-    # - typecheck
 
     - lll # reports long lines
     - copyloopvar # detects places where loop variables are copied (Go 1.22+)
@@ -25,7 +22,6 @@ linters:
     - unconvert # removes unnecessary type conversions
     - unparam # reports unused function parameters
     - nilerr # finds the code that returns nil even if it checks that the error is not nil
-    # - nilnesserr # reports that it checks for err != nil, but it returns a different nil value error (powered by nilness and nilerr)
     - asciicheck # checks that your code does not contain non-ASCII identifiers
 
 issues:
