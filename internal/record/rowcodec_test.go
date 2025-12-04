@@ -154,8 +154,7 @@ func TestDecodeRow_BadBuffer(t *testing.T) {
 	})
 
 	t.Run("too short for nullmap", func(t *testing.T) {
-		// Provide a buffer shorter than null bitmap
-		_, err := DecodeRow(schema, []byte{0x00})
+		_, err := DecodeRow(schema, []byte{})
 		require.Error(t, err)
 		require.ErrorIs(t, err, ErrRowBadNullmap)
 	})
