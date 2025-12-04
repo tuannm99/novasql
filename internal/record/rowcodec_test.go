@@ -76,13 +76,13 @@ func TestEncodeDecodeRow_Nullable(t *testing.T) {
 	require.Nil(t, row[5]) // blob
 }
 
-func TestEncodeRow_SchemaMismatch(t *testing.T) {
+func TestEncodeRow_Errors(t *testing.T) {
 	schema := makeTestSchema()
 
 	t.Run("wrong number of values", func(t *testing.T) {
 		_, err := EncodeRow(schema, []any{1, 2, 3}) // fewer than NumCols
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrSchemaMismatch)
+		require.ErrorIs(t, err, ErrRowValueCount)
 	})
 
 	t.Run("non-nullable column is nil", func(t *testing.T) {
@@ -96,7 +96,7 @@ func TestEncodeRow_SchemaMismatch(t *testing.T) {
 		}
 		_, err := EncodeRow(schema, values)
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrSchemaMismatch)
+		require.ErrorIs(t, err, ErrRowNullNotAllowed)
 	})
 
 	t.Run("wrong type for column", func(t *testing.T) {
@@ -111,7 +111,7 @@ func TestEncodeRow_SchemaMismatch(t *testing.T) {
 		}
 		_, err := EncodeRow(schema, values)
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrSchemaMismatch)
+		require.ErrorIs(t, err, ErrRowTypeMismatch)
 	})
 }
 
@@ -127,7 +127,7 @@ func TestEncodeRow_VarTooLong(t *testing.T) {
 
 	_, err := EncodeRow(schema, []any{longStr})
 	require.Error(t, err)
-	require.ErrorIs(t, err, ErrVarTooLong)
+	require.ErrorIs(t, err, ErrRowVarTooLong)
 }
 
 func TestDecodeRow_BadBuffer(t *testing.T) {
@@ -150,13 +150,13 @@ func TestDecodeRow_BadBuffer(t *testing.T) {
 		truncated := buf[:len(buf)-3]
 		_, err := DecodeRow(schema, truncated)
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrBadBuffer)
+		require.ErrorIs(t, err, ErrRowBufferShort)
 	})
 
 	t.Run("too short for nullmap", func(t *testing.T) {
 		// Provide a buffer shorter than null bitmap
 		_, err := DecodeRow(schema, []byte{0x00})
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrBadBuffer)
+		require.ErrorIs(t, err, ErrRowBadNullmap)
 	})
 }
