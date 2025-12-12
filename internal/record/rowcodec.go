@@ -20,7 +20,15 @@ const (
 
 // ---- Errors ----
 var (
-	ErrSchemaMismatch  = errors.New("rowcodec: schema/values mismatch")
+	ErrSchemaMismatch             = errors.New("rowcodec: schema/values mismatch")
+	ErrSchemaMismatchNotAllowNull = errors.New("rowcodec: schema/values mismatch not allow null")
+	ErrSchemaMismatchNotInt32     = errors.New("rowcodec: schema/values mismatch not int32")
+	ErrSchemaMismatchNotInt64     = errors.New("rowcodec: schema/values mismatch not int64")
+	ErrSchemaMismatchNotBool      = errors.New("rowcodec: schema/values mismatch not bool")
+	ErrSchemaMismatchNotFloat64   = errors.New("rowcodec: schema/values mismatch not float64")
+	ErrSchemaMismatchNotText      = errors.New("rowcodec: schema/values mismatch not text")
+	ErrSchemaMismatchNotBytes     = errors.New("rowcodec: schema/values mismatch not int32")
+
 	ErrBadBuffer       = errors.New("rowcodec: buffer underflow/overflow")
 	ErrVarTooLong      = errors.New("rowcodec: variable length exceeds u16")
 	ErrUnsupportedType = errors.New("rowcodec: unsupported type")
@@ -61,7 +69,7 @@ func EncodeRow(s Schema, values []any) ([]byte, error) {
 		// NULL?
 		if v == nil {
 			if !col.Nullable {
-				return nil, ErrSchemaMismatch
+				return nil, ErrSchemaMismatchNotAllowNull
 			}
 			out[i/8] |= 1 << (uint(i) & 7) // bit=1 => NULL
 			continue
@@ -71,7 +79,7 @@ func EncodeRow(s Schema, values []any) ([]byte, error) {
 		case ColInt32:
 			x, ok := asInt32(v)
 			if !ok {
-				return nil, ErrSchemaMismatch
+				return nil, ErrSchemaMismatchNotInt32
 			}
 			var b [4]byte
 			bx.PutU32(b[:], uint32(x))
@@ -80,7 +88,7 @@ func EncodeRow(s Schema, values []any) ([]byte, error) {
 		case ColInt64:
 			x, ok := asInt64(v)
 			if !ok {
-				return nil, ErrSchemaMismatch
+				return nil, ErrSchemaMismatchNotInt64
 			}
 			var b [8]byte
 			bx.PutU64(b[:], uint64(x))
@@ -89,7 +97,7 @@ func EncodeRow(s Schema, values []any) ([]byte, error) {
 		case ColBool:
 			x, ok := v.(bool)
 			if !ok {
-				return nil, ErrSchemaMismatch
+				return nil, ErrSchemaMismatchNotBool
 			}
 			if x {
 				out = append(out, 1)
@@ -100,7 +108,7 @@ func EncodeRow(s Schema, values []any) ([]byte, error) {
 		case ColFloat64:
 			x, ok := asFloat64(v)
 			if !ok {
-				return nil, ErrSchemaMismatch
+				return nil, ErrSchemaMismatchNotFloat64
 			}
 			var b [8]byte
 			bx.PutU64(b[:], math.Float64bits(x))
@@ -110,7 +118,7 @@ func EncodeRow(s Schema, values []any) ([]byte, error) {
 			// expect string -> UTF-8 bytes
 			str, ok := v.(string)
 			if !ok {
-				return nil, ErrSchemaMismatch
+				return nil, ErrSchemaMismatchNotText
 			}
 			bs := []byte(str)
 			if len(bs) > math.MaxUint16 {
@@ -124,7 +132,7 @@ func EncodeRow(s Schema, values []any) ([]byte, error) {
 		case ColBytes:
 			bs, ok := v.([]byte)
 			if !ok {
-				return nil, ErrSchemaMismatch
+				return nil, ErrSchemaMismatchNotBytes
 			}
 			if len(bs) > math.MaxUint16 {
 				return nil, ErrVarTooLong

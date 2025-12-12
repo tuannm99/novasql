@@ -96,7 +96,7 @@ func TestEncodeRow_SchemaMismatch(t *testing.T) {
 		}
 		_, err := EncodeRow(schema, values)
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrSchemaMismatch)
+		require.ErrorIs(t, err, ErrSchemaMismatchNotAllowNull)
 	})
 
 	t.Run("wrong type for column", func(t *testing.T) {
@@ -111,7 +111,7 @@ func TestEncodeRow_SchemaMismatch(t *testing.T) {
 		}
 		_, err := EncodeRow(schema, values)
 		require.Error(t, err)
-		require.ErrorIs(t, err, ErrSchemaMismatch)
+		require.ErrorIs(t, err, ErrSchemaMismatchNotInt32)
 	})
 }
 
