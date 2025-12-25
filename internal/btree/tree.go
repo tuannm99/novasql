@@ -2,6 +2,7 @@ package btree
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 
@@ -56,28 +57,100 @@ type Tree struct {
 	// nextPageID is the next page ID to allocate for this tree.
 	// Root is fixed at pageID=0, so we start from 1.
 	nextPageID uint32
+
+	// meta persistence
+	metaEnabled bool
+	metaPath    string
 }
 
-// NewTree creates a new Tree handle. The root page will be lazily initialized
-// when the first access happens (via BufferPool → StorageManager.LoadPage).
+// NewTree creates a brand-new tree (no attempt to load persisted meta).
+// Use OpenTree if you want restore Root/Height/nextPageID from disk.
 func NewTree(sm *storage.StorageManager, fs storage.FileSet, bp bufferpool.Manager) *Tree {
+	t := &Tree{SM: sm, FS: fs, BP: bp}
+
+	t.Root = 0
+	t.Height = 1
+	t.nextPageID = 1 // page 0 reserved as root
+
+	if mp, ok := metaPathForFileSet(fs); ok {
+		t.metaEnabled = true
+		t.metaPath = mp
+	}
+
+	t.Meta = &Meta{Root: t.Root, Height: t.Height}
+
+	// persist initial meta best-effort (optional)
+	if err := t.saveMeta(); err != nil {
+		slog.Warn("btree.NewTree: saveMeta failed", "err", err)
+	}
+
+	return t
+}
+
+// OpenTree opens an existing tree:
+// - loads meta file if present (Root/Height/NextPageID)
+// - ALWAYS restores nextPageID safely using CountPages(fs) so we never overwrite pages.
+func OpenTree(sm *storage.StorageManager, fs storage.FileSet, bp bufferpool.Manager) (*Tree, error) {
 	t := &Tree{
 		SM: sm,
 		FS: fs,
 		BP: bp,
 	}
 
-	// For now we assume a fresh index: root at page 0, height 1.
-	// Later, when you persist index meta, you can restore Root/Height/nextPageID from there.
+	// defaults (fresh)
 	t.Root = 0
 	t.Height = 1
-	t.nextPageID = 1 // page 0 is reserved as the first root leaf
+	t.nextPageID = 1
 
-	t.Meta = &Meta{
-		Root:   t.Root,
-		Height: t.Height,
+	if mp, ok := metaPathForFileSet(fs); ok {
+		t.metaEnabled = true
+		t.metaPath = mp
 	}
-	return t
+
+	// Load meta (if any)
+	if m, ok, err := t.loadMeta(); err != nil {
+		return nil, err
+	} else if ok {
+		if m.Height >= 1 {
+			t.Height = m.Height
+		}
+		t.Root = m.Root
+		t.nextPageID = m.NextPageID
+	}
+
+	// Restore nextPageID from on-disk size (single source of truth to avoid overwrite)
+	pageCount, err := sm.CountPages(fs)
+	if err != nil {
+		return nil, err
+	}
+
+	// If any pages exist, nextPageID must be >= pageCount (pages are [0..pageCount-1])
+	if pageCount > 0 {
+		if t.nextPageID < pageCount {
+			t.nextPageID = pageCount
+		}
+	} else {
+		// pageCount==0 but root is still page 0 logically; nextPageID must be at least 1
+		if t.nextPageID < 1 {
+			t.nextPageID = 1
+		}
+	}
+
+	t.Meta = &Meta{Root: t.Root, Height: t.Height}
+
+	// persist normalized meta best-effort
+	if err := t.saveMeta(); err != nil {
+		slog.Warn("btree.OpenTree: saveMeta failed", "err", err)
+	}
+
+	slog.Debug("btree.OpenTree",
+		"root", t.Root,
+		"height", t.Height,
+		"nextPageID", t.nextPageID,
+		"pageCount", pageCount,
+	)
+
+	return t, nil
 }
 
 // allocPage allocates a new page ID for this tree and returns a pinned page
@@ -102,7 +175,11 @@ func (t *Tree) syncMeta() {
 	}
 	t.Meta.Root = t.Root
 	t.Meta.Height = t.Height
-	slog.Debug("btree.syncMeta", "root", t.Meta.Root, "height", t.Meta.Height)
+
+	// best-effort persist
+	if err := t.saveMeta(); err != nil {
+		slog.Warn("btree.syncMeta: saveMeta failed", "err", err)
+	}
 }
 
 // ---- Public API ----
@@ -311,123 +388,71 @@ func (t *Tree) insertIntoLeaf(
 	}
 	leaf := &LeafNode{Page: p}
 
-	need := LeafEntrySize + storage.SlotSize
+	// Load existing physical entries, append new, then sort.
+	entries, err := leaf.readEntries()
+	if err != nil {
+		_ = t.BP.Unpin(p, false)
+		return 0, false, 0, 0, err
+	}
+	entries = append(entries, leafEntry{key: key, tid: tid})
+	sortLeafEntries(entries)
 
-	// Fast path: the leaf still has enough free space for one more entry.
-	if leaf.Page.FreeSpace() >= need {
-		if err := leaf.AppendEntry(key, tid); err != nil {
+	// Compute max entries per empty leaf page (fixed tuple size).
+	// Total size = Header + N*SlotSize + N*LeafEntrySize <= PageSize
+	maxPerPage := (storage.PageSize - storage.HeaderSize) / (storage.SlotSize + LeafEntrySize)
+	if maxPerPage <= 0 {
+		_ = t.BP.Unpin(p, false)
+		return 0, false, 0, 0, fmt.Errorf("btree: leaf page capacity is zero")
+	}
+
+	total := len(entries)
+
+	// Case 1: fits in one page -> rebuild in place (sorted physical order)
+	if total <= maxPerPage {
+		if err := leaf.rebuildSorted(entries); err != nil {
 			_ = t.BP.Unpin(p, false)
 			return 0, false, 0, 0, err
 		}
 		_ = t.BP.Unpin(p, true)
-		slog.Debug("btree.insertIntoLeaf.append_ok",
-			"pageID", pageID,
-			"key", key,
-		)
 		return pageID, false, 0, 0, nil
 	}
 
-	// Slow path: leaf is full, we need to split.
-	n := leaf.NumKeys()
-	slog.Debug("btree.insertIntoLeaf.split_start",
-		"pageID", pageID,
-		"key", key,
-		"numKeys", n,
-	)
-
-	// Copy all existing entries into memory.
-	keys := make([]KeyType, 0, n+1)
-	tids := make([]heap.TID, 0, n+1)
-
-	for i := 0; i < n; i++ {
-		k, tID, err := leaf.EntryAt(i)
-		if err != nil {
-			_ = t.BP.Unpin(p, false)
-			return 0, false, 0, 0, err
-		}
-		keys = append(keys, k)
-		tids = append(tids, tID)
-	}
-
-	// Append the new entry at the end (Tree enforces non-decreasing keys).
-	keys = append(keys, key)
-	tids = append(tids, tid)
-
-	total := len(keys)
+	// Case 2: split into two leaves
 	if total < 2 {
-		// This should never happen in a correct implementation:
-		// - the leaf was reported as "full" (no free space for one more entry)
-		// - we had at least 0 existing keys and just appended one more
-		//
-		// If total < 2, there is a serious bug either in:
-		//   - Page.FreeSpace() calculation,
-		//   - Page.NumSlots(), or
-		//   - how tuples are laid out on the page.
-		slog.Error("btree: invariant violated: trying to split leaf with less than 2 keys",
-			"pageID", pageID,
-			"numExisting", n,
-			"total", total,
-		)
 		_ = t.BP.Unpin(p, false)
-		panic("btree: invariant violated: split leaf with <2 keys")
+		return 0, false, 0, 0, ErrCannotSplitLeafGreaterThanTwo
 	}
 
-	// Split the in-memory entries into left and right halves.
 	mid := total / 2
-	leftID, leftPage, err := t.allocPage()
-	if err != nil {
+	leftEnts := entries[:mid]
+	rightEnts := entries[mid:]
+
+	// Rebuild left in-place (reuse old pageID)
+	if err := leaf.rebuildSorted(leftEnts); err != nil {
 		_ = t.BP.Unpin(p, false)
 		return 0, false, 0, 0, err
 	}
-	slog.Debug("btree.allocPage", "pageID", leftID)
 
-	leftLeaf := &LeafNode{Page: leftPage}
-
+	// Allocate right page
 	rightID, rightPage, err := t.allocPage()
 	if err != nil {
-		_ = t.BP.Unpin(p, false)
-		_ = t.BP.Unpin(leftPage, false)
+		_ = t.BP.Unpin(p, true) // left already rebuilt
 		return 0, false, 0, 0, err
 	}
-	slog.Debug("btree.allocPage", "pageID", rightID)
-
 	rightLeaf := &LeafNode{Page: rightPage}
 
-	// Fill left half.
-	for i := 0; i < mid; i++ {
-		if err := leftLeaf.AppendEntry(keys[i], tids[i]); err != nil {
-			_ = t.BP.Unpin(p, false)
-			_ = t.BP.Unpin(leftPage, false)
-			_ = t.BP.Unpin(rightPage, false)
-			return 0, false, 0, 0, err
-		}
+	if err := rightLeaf.rebuildSorted(rightEnts); err != nil {
+		_ = t.BP.Unpin(p, true)
+		_ = t.BP.Unpin(rightPage, false)
+		return 0, false, 0, 0, err
 	}
 
-	// Fill right half.
-	for i := mid; i < total; i++ {
-		if err := rightLeaf.AppendEntry(keys[i], tids[i]); err != nil {
-			_ = t.BP.Unpin(p, false)
-			_ = t.BP.Unpin(leftPage, false)
-			_ = t.BP.Unpin(rightPage, false)
-			return 0, false, 0, 0, err
-		}
-	}
+	rightMin := rightEnts[0].key
 
-	rightMin := keys[mid]
-
-	_ = t.BP.Unpin(p, false)
-	_ = t.BP.Unpin(leftPage, true)
+	_ = t.BP.Unpin(p, true)
 	_ = t.BP.Unpin(rightPage, true)
 
-	slog.Debug("btree.insertIntoLeaf.split_done",
-		"oldPageID", pageID,
-		"leftID", leftID,
-		"rightID", rightID,
-		"rightMinKey", rightMin,
-		"totalKeys", total,
-	)
-
-	return leftID, true, rightMin, rightID, nil
+	return pageID, true, rightMin, rightID, nil
 }
 
 // insertIntoInternal handles insertion into an internal node at the given level.
@@ -664,19 +689,16 @@ func (t *Tree) findMinKeyInSubtree(pageID uint32, level int) (KeyType, error) {
 			return 0, err
 		}
 		leaf := &LeafNode{Page: p}
-		if leaf.NumKeys() == 0 {
-			_ = t.BP.Unpin(p, false)
+		defer func() { _ = t.BP.Unpin(p, false) }()
+
+		entries, err := leaf.entriesSorted()
+		if err != nil {
+			return 0, err
+		}
+		if len(entries) == 0 {
 			return 0, ErrLeafHasNoKey
 		}
-		k, err := leaf.KeyAt(0)
-		_ = t.BP.Unpin(p, false)
-		if err == nil {
-			slog.Debug("btree.findMinKeyInSubtree.leaf",
-				"pageID", pageID,
-				"key", k,
-			)
-		}
-		return k, err
+		return entries[0].key, nil
 	}
 
 	p, err := t.BP.GetPage(pageID)
@@ -693,14 +715,5 @@ func (t *Tree) findMinKeyInSubtree(pageID uint32, level int) (KeyType, error) {
 	if err != nil {
 		return 0, err
 	}
-
-	k, err := t.findMinKeyInSubtree(child, level-1)
-	if err == nil {
-		slog.Debug("btree.findMinKeyInSubtree.internal",
-			"pageID", pageID,
-			"level", level,
-			"minKey", k,
-		)
-	}
-	return k, err
+	return t.findMinKeyInSubtree(child, level-1)
 }

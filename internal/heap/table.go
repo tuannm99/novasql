@@ -3,6 +3,7 @@ package heap
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/record"
@@ -26,6 +27,10 @@ type Table struct {
 
 	// Overflow manager for large values of this table.
 	Overflow *storage.OverflowManager
+
+	// pageCountHook is a best-effort callback invoked when PageCount changes
+	// (usually when allocating a new page).
+	pageCountHook func(pageCount uint32) error
 }
 
 func NewTable(
@@ -48,9 +53,14 @@ func NewTable(
 	}
 }
 
+func (t *Table) SetPageCountHook(fn func(pageCount uint32) error) {
+	t.pageCountHook = fn
+}
+
 // Insert inserts a new row into the heap.
-// V1 naive -> always prefer last page; if page is full, create a new one.
 func (t *Table) Insert(values []any) (TID, error) {
+	oldPageCount := t.PageCount
+
 	var pageID uint32
 	if t.PageCount == 0 {
 		pageID = 0
@@ -59,7 +69,6 @@ func (t *Table) Insert(values []any) (TID, error) {
 		pageID = t.PageCount - 1
 	}
 
-	// Pre-encode row once, including overflow handling.
 	tuple, err := t.encodeRowWithOverflow(values)
 	if err != nil {
 		return TID{}, err
@@ -73,7 +82,6 @@ func (t *Table) Insert(values []any) (TID, error) {
 
 		slot, err := p.InsertTuple(tuple)
 		if err == storage.ErrNoSpace {
-			// Page full -> unpin, move to next page.
 			_ = t.BP.Unpin(p, false)
 
 			pageID = t.PageCount
@@ -85,9 +93,15 @@ func (t *Table) Insert(values []any) (TID, error) {
 			return TID{}, err
 		}
 
-		// Mark as dirty because we modified the page.
 		if err := t.BP.Unpin(p, true); err != nil {
 			return TID{}, err
+		}
+
+		// Best-effort: if PageCount changed, sync meta.
+		if t.PageCount != oldPageCount && t.pageCountHook != nil {
+			if err := t.pageCountHook(t.PageCount); err != nil {
+				slog.Warn("heap: pagecount hook failed", "table", t.Name, "pageCount", t.PageCount, "err", err)
+			}
 		}
 
 		return TID{PageID: pageID, Slot: uint16(slot)}, nil
@@ -116,17 +130,47 @@ func (t *Table) Update(id TID, values []any) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = t.BP.Unpin(p, false) }()
 
-	// Encode row with same layout as Insert (inline/overflow).
+	// 1) capture old overflow ref (if any)
+	var oldRef *storage.OverflowRef
+	oldRaw, err := p.ReadTuple(int(id.Slot))
+	if err == nil && len(oldRaw) > 0 && oldRaw[0] == rowKindOverflow && len(oldRaw) >= 1+8 {
+		first := bx.U32(oldRaw[1:5])
+		length := bx.U32(oldRaw[5:9])
+		ref := storage.OverflowRef{FirstPageID: first, Length: length}
+		oldRef = &ref
+	}
+
+	// 2) encode new tuple
 	tuple, err := t.encodeRowWithOverflow(values)
 	if err != nil {
-		_ = t.BP.Unpin(p, false)
 		return err
 	}
 
-	err = p.UpdateTuple(int(id.Slot), tuple)
-	_ = t.BP.Unpin(p, err == nil)
-	return err
+	// 3) update tuple
+	if err := p.UpdateTuple(int(id.Slot), tuple); err != nil {
+		return err
+	}
+
+	// mark dirty
+	_ = t.BP.Unpin(p, true)
+
+	// 4) free old overflow chain if it existed
+	if oldRef != nil && t.Overflow != nil && oldRef.Length > 0 {
+		if err := t.Overflow.Free(*oldRef); err != nil {
+			slog.Warn("heap: overflow free failed after update (leak accepted)",
+				"table", t.Name,
+				"pageID", id.PageID,
+				"slot", id.Slot,
+				"first", oldRef.FirstPageID,
+				"len", oldRef.Length,
+				"err", err,
+			)
+		}
+	}
+
+	return nil
 }
 
 // Delete marks a single row identified by TID as deleted.
@@ -135,10 +179,40 @@ func (t *Table) Delete(id TID) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = t.BP.Unpin(p, false) }()
 
-	err = p.DeleteTuple(int(id.Slot))
-	_ = t.BP.Unpin(p, err == nil)
-	return err
+	// capture overflow ref before delete
+	var oldRef *storage.OverflowRef
+	oldRaw, err := p.ReadTuple(int(id.Slot))
+	if err == nil && len(oldRaw) > 0 && oldRaw[0] == rowKindOverflow && len(oldRaw) >= 1+8 {
+		first := bx.U32(oldRaw[1:5])
+		length := bx.U32(oldRaw[5:9])
+		ref := storage.OverflowRef{FirstPageID: first, Length: length}
+		oldRef = &ref
+	}
+
+	// delete slot
+	if err := p.DeleteTuple(int(id.Slot)); err != nil {
+		return err
+	}
+
+	_ = t.BP.Unpin(p, true)
+
+	// free overflow chain best-effort
+	if oldRef != nil && t.Overflow != nil && oldRef.Length > 0 {
+		if err := t.Overflow.Free(*oldRef); err != nil {
+			slog.Warn("heap: overflow free failed after delete (leak accepted)",
+				"table", t.Name,
+				"pageID", id.PageID,
+				"slot", id.Slot,
+				"first", oldRef.FirstPageID,
+				"len", oldRef.Length,
+				"err", err,
+			)
+		}
+	}
+
+	return nil
 }
 
 // Scan iterates through all visible rows in the table.
@@ -179,9 +253,17 @@ func (t *Table) Scan(fn func(id TID, row []any) error) error {
 	return nil
 }
 
-// Flush forces all dirty pages of this table's buffer pool to disk.
 func (t *Table) Flush() error {
-	return t.BP.FlushAll()
+	if err := t.BP.FlushAll(); err != nil {
+		return err
+	}
+
+	if t.pageCountHook != nil {
+		if err := t.pageCountHook(t.PageCount); err != nil {
+			slog.Warn("heap: pagecount hook failed after flush", "table", t.Name, "pageCount", t.PageCount, "err", err)
+		}
+	}
+	return nil
 }
 
 // encodeRowWithOverflow decides whether to store row inline or in overflow.
@@ -266,4 +348,19 @@ func (t *Table) decodeRowWithOverflow(raw []byte) ([]any, error) {
 	default:
 		return nil, fmt.Errorf("heap: unknown row kind %d", kind)
 	}
+}
+
+// parseOverflowRefFromTuple parses a rowKindOverflow tuple payload into OverflowRef.
+// raw is the whole tuple stored in page, including kind byte.
+func parseOverflowRefFromTuple(raw []byte) (storage.OverflowRef, bool) {
+	if len(raw) < 1+8 {
+		return storage.OverflowRef{}, false
+	}
+	if raw[0] != rowKindOverflow {
+		return storage.OverflowRef{}, false
+	}
+	payload := raw[1:]
+	first := bx.U32(payload[0:4])
+	length := bx.U32(payload[4:8])
+	return storage.OverflowRef{FirstPageID: first, Length: length}, true
 }

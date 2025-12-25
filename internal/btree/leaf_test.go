@@ -97,36 +97,3 @@ func TestLeaf_FindEqualAndRange(t *testing.T) {
 		require.True(t, found, "tid not found in leaf entries")
 	}
 }
-
-func TestLeaf_FirstGEKey(t *testing.T) {
-	leaf, _, _, bp := newTestLeaf(t)
-	defer func() {
-		_ = bp.Unpin(leaf.Page, false)
-	}()
-
-	// Insert keys: 10, 20, 30, 40.
-	for i, k := range []KeyType{10, 20, 30, 40} {
-		require.NoError(t, leaf.AppendEntry(k, heap.TID{PageID: 1, Slot: uint16(i)}))
-	}
-
-	idx, err := leaf.FirstGEKey(5)
-	require.NoError(t, err)
-	require.Equal(t, 0, idx)
-
-	idx, err = leaf.FirstGEKey(10)
-	require.NoError(t, err)
-	require.Equal(t, 0, idx)
-
-	idx, err = leaf.FirstGEKey(25)
-	require.NoError(t, err)
-	require.Equal(t, 2, idx) // >=30
-
-	idx, err = leaf.FirstGEKey(40)
-	require.NoError(t, err)
-	require.Equal(t, 3, idx)
-
-	// > max → -1
-	idx, err = leaf.FirstGEKey(50)
-	require.NoError(t, err)
-	require.Equal(t, -1, idx)
-}

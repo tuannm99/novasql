@@ -21,22 +21,14 @@ import (
 //     Let entries be e[0..n-1], with e[i] = (minKey_i, child_i).
 //
 //     For i in 0..n-2:
-//     if K < minKey_{i+1}:
-//     return child_i
+//     if K < minKey_{i+1}: return child_i
 //     return child_{n-1}
-//
-//   - This is equivalent to classic B+Tree where internal separators are the
-//     minimum key values for each child subtree (except the leftmost).
 type InternalNode struct {
 	Page *storage.Page
 }
 
-// NumKeys returns how many entries (slots) are on this internal node.
-func (n *InternalNode) NumKeys() int {
-	return n.Page.NumSlots()
-}
+func (n *InternalNode) NumKeys() int { return n.Page.NumSlots() }
 
-// EntryAt decodes the i-th internal entry into (key, childPageID).
 func (n *InternalNode) EntryAt(i int) (KeyType, uint32, error) {
 	data, err := n.Page.ReadTuple(i)
 	if err != nil {
@@ -46,7 +38,6 @@ func (n *InternalNode) EntryAt(i int) (KeyType, uint32, error) {
 	return key, child, nil
 }
 
-// AppendEntry appends a new (key, childPageID) entry at the end of the page.
 func (n *InternalNode) AppendEntry(key KeyType, child uint32) error {
 	data := EncodeInternalEntry(key, child)
 	slot, err := n.Page.InsertTuple(data)
@@ -61,7 +52,6 @@ func (n *InternalNode) AppendEntry(key KeyType, child uint32) error {
 	return err
 }
 
-// internalEntry is a convenient in-memory representation of an internal tuple.
 type internalEntry struct {
 	key   KeyType
 	child uint32
@@ -83,33 +73,26 @@ func (n *InternalNode) readEntries() ([]internalEntry, error) {
 
 // findChildIndex returns (index, childPageID) for a given search key using
 // the "minKey" semantics described in the type comment above.
+//
+// This implementation decodes entries once, then uses binary search.
 func (n *InternalNode) findChildIndex(key KeyType) (int, uint32, error) {
-	num := n.NumKeys()
+	entries, err := n.readEntries()
+	if err != nil {
+		return 0, 0, err
+	}
+	num := len(entries)
 	if num == 0 {
 		return 0, 0, errors.New("btree: internal node has no entries")
 	}
 	if num == 1 {
-		_, child, err := n.EntryAt(0)
-		return 0, child, err
+		return 0, entries[0].child, nil
 	}
 
-	// For i in [0..num-2], compare against minKey of the *next* entry.
-	for i := 0; i < num-1; i++ {
-		_, child, err := n.EntryAt(i)
-		if err != nil {
-			return 0, 0, err
-		}
-		nextKey, _, err := n.EntryAt(i + 1)
-		if err != nil {
-			return 0, 0, err
-		}
-		if key < nextKey {
-			return i, child, nil
+	// For i in [0..num-2], compare against minKey of the next entry.
+	for i := range num - 1 {
+		if key < entries[i+1].key {
+			return i, entries[i].child, nil
 		}
 	}
-
-	// Otherwise use the last child.
-	_, child, err := n.EntryAt(num - 1)
-	return num - 1, child, err
+	return num - 1, entries[num-1].child, nil
 }
-

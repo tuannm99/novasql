@@ -265,3 +265,9 @@ func (p *Page) DeleteTuple(slot int) error {
 	}
 	return p.putSlot(slot, Slot{Offset: 0, Length: 0, Flags: SlotFlagDeleted})
 }
+
+// Reset clears page content and re-initializes header.
+// Useful for "rebuild page in-place" (e.g. BTree node rewrite).
+func (p *Page) Reset(pageID uint32) {
+	p.init(pageID)
+}

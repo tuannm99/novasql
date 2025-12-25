@@ -3,12 +3,14 @@ package novasql
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/tuannm99/novasql/internal/btree"
 	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/heap"
 	"github.com/tuannm99/novasql/internal/record"
@@ -18,6 +20,7 @@ import (
 var (
 	ErrDatabaseClosed = errors.New("novasql: database is closed")
 	ErrInvalidPageID  = errors.New("novasql: invalid page ID")
+	ErrBadIdent       = errors.New("novasql: invalid identifier")
 )
 
 // DatabaseOperation defines the high-level operations that a Database supports.
@@ -40,8 +43,10 @@ type TableMeta struct {
 	Name      string        `json:"name"`
 	Schema    record.Schema `json:"schema"`
 	PageCount uint32        `json:"page_count"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	Indexes   []IndexMeta   `json:"indexes,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 var _ DatabaseOperation = (*Database)(nil)
@@ -103,23 +108,17 @@ func (db *Database) overflowFileSet(name string) storage.LocalFileSet {
 }
 
 // writeTableMeta overwrites the meta JSON file for a given table.
-//
-// NOTE: We still use os.* here because LocalFileSet currently represents
-// data page sets only, not arbitrary metadata files.
 func (db *Database) writeTableMeta(meta *TableMeta) error {
 	if err := os.MkdirAll(db.tableDir(), 0o755); err != nil {
 		return err
 	}
-
 	meta.UpdatedAt = time.Now()
-
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return err
 	}
-
 	path := db.tableMetaPath(meta.Name)
-	return os.WriteFile(path, data, 0o644)
+	return writeFileAtomic(path, data, 0o644)
 }
 
 // readTableMeta loads table metadata from JSON file.
@@ -140,31 +139,42 @@ func (db *Database) readTableMeta(name string) (*TableMeta, error) {
 
 // CreateTable creates a new heap table and its associated overflow storage.
 func (db *Database) CreateTable(name string, schema record.Schema) (*heap.Table, error) {
+	if err := validateIdent(name); err != nil {
+		return nil, err
+	}
+
 	fs := db.tableFileSet(name)
 	bp := bufferpool.NewPool(db.SM, fs, bufferpool.DefaultCapacity)
 
+	now := time.Now()
 	meta := &TableMeta{
 		Name:      name,
 		Schema:    schema,
 		PageCount: 0,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		Indexes:   nil,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := db.writeTableMeta(meta); err != nil {
 		return nil, err
 	}
 
-	// Overflow data for this table is stored in a separate fileset with a
-	// deterministic naming convention: "<table>_ovf".
 	overflowFS := db.overflowFileSet(name)
 	ovf := storage.NewOverflowManager(db.SM, overflowFS)
 
 	tbl := heap.NewTable(name, schema, db.SM, fs, bp, ovf, 0)
+	tbl.SetPageCountHook(func(pc uint32) error {
+		return db.syncTableMetaPageCountByName(name, pc)
+	})
 	return tbl, nil
 }
 
 // OpenTable opens an existing table using the on-disk metadata and page set.
 func (db *Database) OpenTable(name string) (*heap.Table, error) {
+	if err := validateIdent(name); err != nil {
+		return nil, err
+	}
+
 	fs := db.tableFileSet(name)
 
 	meta, err := db.readTableMeta(name)
@@ -172,54 +182,76 @@ func (db *Database) OpenTable(name string) (*heap.Table, error) {
 		return nil, err
 	}
 
-	// Count pages on disk as the single source of truth.
 	pageCount, err := db.SM.CountPages(fs)
 	if err != nil {
 		return nil, err
 	}
 
-	// Refresh meta PageCount snapshot.
+	// Refresh meta snapshot (keep Indexes intact).
 	meta.PageCount = pageCount
 	meta.UpdatedAt = time.Now()
 
-	// Best-effort update; if this fails, we still can open the table.
+	// Best-effort update.
 	if err := db.writeTableMeta(meta); err != nil {
 		slog.Info("open table: error writing table meta", "err", err, "table", name)
 	}
 
 	bp := bufferpool.NewPool(db.SM, fs, bufferpool.DefaultCapacity)
 
-	// Rebuild the overflow manager for this table based on the same naming
-	// convention used in CreateTable.
 	overflowFS := db.overflowFileSet(name)
 	ovf := storage.NewOverflowManager(db.SM, overflowFS)
 
 	tbl := heap.NewTable(name, meta.Schema, db.SM, fs, bp, ovf, pageCount)
+	tbl.SetPageCountHook(func(pc uint32) error {
+		return db.syncTableMetaPageCountByName(name, pc)
+	})
 	return tbl, nil
 }
 
-// DropTable removes all on-disk data for a table: heap pages, overflow pages,
+// DropTable removes all on-disk data for a table: indexes, heap pages, overflow pages,
 // and the metadata JSON file.
 func (db *Database) DropTable(name string) error {
-	// Remove heap page directory.
-	tablePath := filepath.Join(db.tableDir(), name)
-	if err := os.RemoveAll(tablePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := validateIdent(name); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(db.tableDir(), 0o755); err != nil {
 		return err
 	}
 
-	// Remove overflow page directory.
-	overflowPath := filepath.Join(db.tableDir(), name+"_ovf")
-	if err := os.RemoveAll(overflowPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// Best-effort: remove indexes first (so you don't leave garbage files).
+	if meta, err := db.readTableMeta(name); err == nil && meta != nil {
+		for _, im := range meta.Indexes {
+			// Only btree for now
+			if im.Kind != IndexKindBTree {
+				continue
+			}
+			base := im.FileBase
+			// Backward compat (in case FileBase was empty in older meta):
+			if base == "" {
+				base = db.fmtIndexBase(name, im.Name)
+			}
+			fs := storage.LocalFileSet{Dir: db.tableDir(), Base: base}
+			if err := btree.DropIndex(fs); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Remove heap segments: name, name.1, ...
+	if err := storage.RemoveAllSegments(storage.LocalFileSet{Dir: db.tableDir(), Base: name}); err != nil {
 		return err
 	}
 
-	// Remove meta file.
+	// Remove overflow segments: name_ovf, name_ovf.1, ...
+	if err := storage.RemoveAllSegments(storage.LocalFileSet{Dir: db.tableDir(), Base: name + "_ovf"}); err != nil {
+		return err
+	}
+
+	// Remove meta file
 	metaPath := db.tableMetaPath(name)
 	if err := os.Remove(metaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-
-	// TODO: later - also update in-memory catalog, drop related indexes, etc.
 	return nil
 }
 
@@ -244,11 +276,9 @@ func (db *Database) ListTables() ([]*TableMeta, error) {
 			continue
 		}
 
-		// Strip ".meta.json" to get the table name.
 		tableName := strings.TrimSuffix(name, ".meta.json")
 		meta, err := db.readTableMeta(tableName)
 		if err != nil {
-			// Best-effort: log and skip broken meta files.
 			slog.Warn("list tables: failed to read table meta", "file", name, "err", err)
 			continue
 		}
@@ -258,68 +288,102 @@ func (db *Database) ListTables() ([]*TableMeta, error) {
 	return metas, nil
 }
 
-// RenameTable renames a table: heap dir, overflow dir, and meta file.
-//
-// NOTE: This does not handle open table handles or indexes yet.
+// RenameTable renames heap + ovf + meta + index segments and updates registry.
 func (db *Database) RenameTable(oldName, newName string) error {
-	// Ensure tableDir exists.
+	if err := validateIdent(oldName); err != nil {
+		return err
+	}
+	if err := validateIdent(newName); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(db.tableDir(), 0o755); err != nil {
 		return err
 	}
 
-	// Heap dir rename.
-	oldTablePath := filepath.Join(db.tableDir(), oldName)
-	newTablePath := filepath.Join(db.tableDir(), newName)
-	if _, err := os.Stat(oldTablePath); err == nil {
-		if err := os.Rename(oldTablePath, newTablePath); err != nil {
-			return err
-		}
-	}
-
-	// Overflow dir rename.
-	oldOverflowPath := filepath.Join(db.tableDir(), oldName+"_ovf")
-	newOverflowPath := filepath.Join(db.tableDir(), newName+"_ovf")
-	if _, err := os.Stat(oldOverflowPath); err == nil {
-		if err := os.Rename(oldOverflowPath, newOverflowPath); err != nil {
-			return err
-		}
-	}
-
-	// Meta file rename + update content.
-	oldMetaPath := db.tableMetaPath(oldName)
+	// Prevent accidental overwrite
 	newMetaPath := db.tableMetaPath(newName)
-
-	if _, err := os.Stat(oldMetaPath); err == nil {
-		if err := os.Rename(oldMetaPath, newMetaPath); err != nil {
-			return err
-		}
-
-		meta, err := db.readTableMeta(newName)
-		if err != nil {
-			return err
-		}
-		meta.Name = newName
-		meta.UpdatedAt = time.Now()
-		if err := db.writeTableMeta(meta); err != nil {
-			return err
-		}
+	if _, err := os.Stat(newMetaPath); err == nil {
+		return fmt.Errorf("novasql: table already exists: %s", newName)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 
-	// TODO: later - update in-memory catalog, rename related indexes, etc.
-	return nil
+	// Load old meta first (needed to rename index segments)
+	meta, err := db.readTableMeta(oldName)
+	if err != nil {
+		return err
+	}
+
+	// 1) Rename heap segments
+	if err := storage.RenameAllSegments(
+		storage.LocalFileSet{Dir: db.tableDir(), Base: oldName},
+		storage.LocalFileSet{Dir: db.tableDir(), Base: newName},
+	); err != nil {
+		return err
+	}
+
+	// 2) Rename overflow segments
+	if err := storage.RenameAllSegments(
+		storage.LocalFileSet{Dir: db.tableDir(), Base: oldName + "_ovf"},
+		storage.LocalFileSet{Dir: db.tableDir(), Base: newName + "_ovf"},
+	); err != nil {
+		return err
+	}
+
+	// 3) Rename index segments + update registry FileBase
+	now := time.Now()
+	for i := range meta.Indexes {
+		im := &meta.Indexes[i]
+		if im.Kind != IndexKindBTree {
+			continue
+		}
+
+		oldBase := im.FileBase
+		if oldBase == "" {
+			// Backward compat if older meta didn't store FileBase
+			oldBase = db.fmtIndexBase(oldName, im.Name)
+		}
+		newBase := db.fmtIndexBase(newName, im.Name)
+
+		if err := storage.RenameAllSegments(
+			storage.LocalFileSet{Dir: db.tableDir(), Base: oldBase},
+			storage.LocalFileSet{Dir: db.tableDir(), Base: newBase},
+		); err != nil {
+			return err
+		}
+
+		im.FileBase = newBase
+		im.UpdatedAt = now
+	}
+
+	// 4) Rename meta file itself (oldName.meta.json -> newName.meta.json)
+	oldMetaPath := db.tableMetaPath(oldName)
+	if err := os.Rename(oldMetaPath, newMetaPath); err != nil {
+		// If rename fails here, you already renamed data files.
+		// It's ok for phase2; user can retry. But we return error.
+		return err
+	}
+
+	// 5) Rewrite meta content with new table name (atomic overwrite)
+	meta.Name = newName
+	meta.UpdatedAt = now
+	return db.writeTableMeta(meta)
+}
+
+func (db *Database) syncTableMetaPageCountByName(name string, pageCount uint32) error {
+	meta, err := db.readTableMeta(name)
+	if err != nil {
+		return err
+	}
+	meta.PageCount = pageCount
+	return db.writeTableMeta(meta)
 }
 
 // Close currently does nothing but is kept for future extension.
-//
-// TODO: later - keep track of opened tables, flush all buffer pools, close WAL, etc.
 func (db *Database) Close() error {
 	return nil
 }
 
-// UpdateTableSchema updates the table metadata schema definition only.
-//
-// Not supported yet: we do not have a real ALTER TABLE that rewrites data.
-// This function does NOT touch any on-disk tuples or pages.
 func (db *Database) UpdateTableSchema(name string, newSchema record.Schema) error {
 	meta, err := db.readTableMeta(name)
 	if err != nil {
@@ -332,7 +396,6 @@ func (db *Database) UpdateTableSchema(name string, newSchema record.Schema) erro
 	return db.writeTableMeta(meta)
 }
 
-// SyncTableMetaPageCount updates the table meta when only PageCount changes.
 func (db *Database) SyncTableMetaPageCount(tbl *heap.Table) error {
 	meta, err := db.readTableMeta(tbl.Name)
 	if err != nil {
@@ -340,4 +403,66 @@ func (db *Database) SyncTableMetaPageCount(tbl *heap.Table) error {
 	}
 	meta.PageCount = tbl.PageCount
 	return db.writeTableMeta(meta)
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	tmp, err := os.CreateTemp(dir, base+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
+// fmtIndexBase returns LocalFileSet.Base for index segments.
+// Example: table="users", index="idx_age" -> "users__idx__idx_age"
+func (db *Database) fmtIndexBase(table, index string) string {
+	table = strings.TrimSpace(table)
+	index = strings.TrimSpace(index)
+	return table + "__idx__" + index
+}
+
+func validateIdent(name string) error {
+	if name == "" {
+		return ErrBadIdent
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return ErrBadIdent
+	}
+	if strings.Contains(name, "..") {
+		return ErrBadIdent
+	}
+	return nil
 }
