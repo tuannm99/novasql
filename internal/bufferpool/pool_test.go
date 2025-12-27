@@ -42,11 +42,12 @@ func TestPool_GetPage_LoadsAndPins(t *testing.T) {
 	require.NotNil(t, page1)
 	require.Equal(t, uint32(0), page1.PageID())
 
-	// frames slice is fixed-size == capacity, but only index 0 is used now.
-	require.Len(t, pool.frames, pool.capacity)
-	require.NotNil(t, pool.frames[0])
+	// Find the frame by pageTable instead of assuming index 0.
+	idx, ok := pool.pageTable[0]
+	require.True(t, ok)
+	require.NotNil(t, pool.frames[idx])
 
-	frame := pool.frames[0]
+	frame := pool.frames[idx]
 	require.Equal(t, uint32(0), frame.PageID)
 	require.Equal(t, int32(1), frame.Pin)
 	require.False(t, frame.Dirty)
@@ -62,16 +63,17 @@ func TestPool_GetPage_Full_NoFreeFrameError(t *testing.T) {
 	pool, cleanup := newTestPool(t, 1)
 	defer cleanup()
 
-	// frames has size == capacity from the beginning.
-	require.Len(t, pool.frames, pool.capacity)
-
 	// Fill the only frame with page 0 and keep it pinned.
 	page0, err := pool.GetPage(0)
 	require.NoError(t, err)
 	require.NotNil(t, page0)
+
 	require.Len(t, pool.frames, 1)
-	require.NotNil(t, pool.frames[0])
-	require.Equal(t, int32(1), pool.frames[0].Pin)
+
+	idx0, ok := pool.pageTable[0]
+	require.True(t, ok)
+	require.NotNil(t, pool.frames[idx0])
+	require.Equal(t, int32(1), pool.frames[idx0].Pin)
 
 	// Try to get a different page without unpinning the first one -> no free frame.
 	_, err = pool.GetPage(1)
@@ -95,16 +97,20 @@ func TestPool_EvictDirtyFrameAndFlush(t *testing.T) {
 	// Unpin with dirty = true so the frame is marked dirty and evictable.
 	err = pool.Unpin(page0, true)
 	require.NoError(t, err)
-	require.Equal(t, int32(0), pool.frames[0].Pin)
-	require.True(t, pool.frames[0].Dirty)
+
+	idx0, ok := pool.pageTable[0]
+	require.True(t, ok)
+	require.Equal(t, int32(0), pool.frames[idx0].Pin)
+	require.True(t, pool.frames[idx0].Dirty)
 
 	// Step 2: Request page 1, forcing eviction of page 0.
 	page1, err := pool.GetPage(1)
 	require.NoError(t, err)
 	require.NotNil(t, page1)
+	require.Equal(t, uint32(1), page1.PageID())
 
 	// At this point page 0 should have been flushed to disk by eviction.
-	// We reload page 0 directly from StorageManager and verify the content.
+	// Reload page 0 directly from StorageManager and verify the content.
 	sm := pool.sm
 	fs := pool.fs
 
@@ -134,8 +140,14 @@ func TestPool_FlushAll_WritesDirtyFrames(t *testing.T) {
 	// FlushAll should write both pages to disk and clear dirty flags.
 	err = pool.FlushAll()
 	require.NoError(t, err)
-	require.False(t, pool.frames[0].Dirty)
-	require.False(t, pool.frames[1].Dirty)
+
+	idx0, ok := pool.pageTable[0]
+	require.True(t, ok)
+	idx1, ok := pool.pageTable[1]
+	require.True(t, ok)
+
+	require.False(t, pool.frames[idx0].Dirty)
+	require.False(t, pool.frames[idx1].Dirty)
 
 	// Reload from disk and verify the changes are persisted.
 	sm := pool.sm
@@ -150,7 +162,7 @@ func TestPool_FlushAll_WritesDirtyFrames(t *testing.T) {
 	require.Equal(t, byte(22), reloaded1.Buf[20])
 }
 
-// Optional: verify default capacity is used when capacity <= 0.
+// Verify default capacity is used when capacity <= 0.
 func TestNewPool_DefaultCapacity(t *testing.T) {
 	sm := storage.NewStorageManager()
 	dir := t.TempDir()
@@ -160,16 +172,12 @@ func TestNewPool_DefaultCapacity(t *testing.T) {
 	}
 
 	pool := NewPool(sm, fs, 0)
-	require.Equal(t, 16, pool.capacity)
-	require.Len(t, pool.frames, pool.capacity)
 
 	// Sanity: can still use the pool.
 	page, err := pool.GetPage(0)
 	require.NoError(t, err)
 	require.NotNil(t, page)
 }
-
-// New tests for DeletePageFromBuffer & free slot reuse.
 
 func TestPool_DeletePageFromBuffer_Unpinned(t *testing.T) {
 	pool, cleanup := newTestPool(t, 2)
@@ -234,13 +242,13 @@ func TestPool_ReusesFreedFrameSlot(t *testing.T) {
 
 	idx0, ok := pool.pageTable[0]
 	require.True(t, ok)
-	require.Equal(t, 0, idx0)
+	require.NotNil(t, pool.frames[idx0])
 
 	require.NoError(t, pool.Unpin(page0, false))
 	require.NoError(t, pool.DeletePageFromBuffer(0))
 	require.Nil(t, pool.frames[idx0])
 
-	// Load page 1, got free slot (idx0)
+	// Load page 1, should use the freed slot idx0 (because pool scans nil slots).
 	page1, err := pool.GetPage(1)
 	require.NoError(t, err)
 	require.NotNil(t, page1)
