@@ -23,55 +23,134 @@ The project is structured to mirror real-world database engines (SQLite/PostgreS
 
 ## ✅ Current Status
 
-> What is actually implemented right now?
+> What is actually implemented right now (based on the code you showed: Storage/Page + GlobalPool/View + Heap + B+Tree + Database meta).
 
-### Storage & Pages
+### 1) Storage & Pages
 
-- `StorageManager` for reading/writing fixed-size pages to disk
-- `FileSet` abstraction for mapping logical files to on-disk files
-  - `LocalFileSet` concrete implementation using the local filesystem
-- `Page` structure
-  - Slotted-page layout (tuple directory, free space in the middle)
-  - Insert / read tuple primitives
+- `StorageManager`
+  - Reads/writes **fixed-size pages** to disk for a given `FileSet`
+  - `CountPages(fs)` to get the on-disk page count for a relation
+- `FileSet` abstraction
+  - `LocalFileSet{Dir, Base}` is the main implementation (and is required by `GlobalPool`)
+  - Segment operations:
+    - `RemoveAllSegments(fs)`
+    - `RenameAllSegments(old, new)`
+- `Page`
+  - **slotted-page layout** (tuple directory + free space)
+  - tuple insert/read primitives by slot
+  - `PageID()` is used to identify a page
 
-> This is the foundation that everything else (heap, indexes, WAL) builds on.
+---
 
-### Buffer Pool (with CLOCK)
+### 2) Buffer Pool
 
-- `Pool` in `bufferpool` package:
-  - Fixed-size array of `Frame`
-  - `Manager` interface for table-level usage
-  - Tracks:
-    - `Pin` count (how many users are “holding” this page)
-    - `Dirty` flag (needs to be flushed to disk)
-- **Replacement Policy**: CLOCK (approximate LRU)
-  - Each `Frame` has a `Ref` bit
-  - On access → `Ref = true`
-  - When pool is full:
-    - CLOCK hand sweeps over frames:
-      - Pinned (`Pin > 0`) → skip
-      - `Ref == true` → set to `false` (second chance)
-      - `Ref == false` & `Pin == 0` → victim
+#### ✅ GlobalPool (shared buffer pool)
 
-This gives NovaSQL a realistic, DB-style buffer manager instead of a naive “first unpinned” policy.
+- `bufferpool.GlobalPool`
+  - **one shared pool for ALL relations** (heap / index / overflow)
+  - page identity is:
+    - `PageTag{ FSKey: "Dir|Base", PageID }`
+  - each frame contains:
+    - `FS storage.LocalFileSet` (required for correct flush)
+    - `Pin`, `Dirty`, `Page`
 
-### Heap Tables
+#### ✅ Replacement Policy: CLOCK
 
-- `heap.Table` (very early version)
-  - Uses:
-    - `StorageManager` + `FileSet` for disk I/O
-    - `bufferpool.Pool` for caching pages
-  - Provides:
-    - `InsertRow(values []any)` → encode row → write into a heap page
-    - `ReadRow(slot)` via `HeapPage` → decode row back
-    - `UpdateRow(slot, values)` via `HeapPage` → update row
-    - `DeleteRow(slot)` via `HeapPage` → decode row
+- CLOCK-based eviction:
+  - pinned (`Pin > 0`) pages are not evictable
+  - ref-bit logic is handled by the CLOCK adapter
 
-Row encoding/decoding:
+#### ✅ FileSetView (relation-scoped Manager)
 
-- `EncodeRow(schema, values)` / `DecodeRow` for turning Go values into on-page byte layouts.
+- `FileSetView` binds `(GlobalPool + FileSet)` and implements `bufferpool.Manager`
+- lets `heap.Table` / `btree.Tree` use a “per-relation manager” API
+- `Database` caches views by `"Dir|Base"`
 
-> This layer is roughly comparable to a minimal “table heap” in PostgreSQL / SQLite.
+---
+
+### 3) Heap Tables
+
+- `heap.Table`
+  - uses:
+    - `StorageManager`
+    - heap `FileSet`
+    - `bufferpool.Manager` (**now via View**)
+    - `OverflowManager` (`*_ovf`)
+  - supports:
+    - `Insert(values)`
+    - `Get(tid)`
+    - `Scan(fn)`
+    - `Update(tid, values)` (supports redirect)
+    - `Delete(tid)`
+
+#### ✅ Redirect semantics
+
+- Update may enlarge a tuple → write a new tuple elsewhere and mark the old slot as a **redirect**
+- therefore:
+  - `Get(oldTID)` still returns the latest row (follows redirect) ✅
+  - an index pointing to the old TID still “works” as long as the row isn’t deleted ✅
+
+---
+
+### 4) B+Tree Index (early)
+
+- `btree.Tree`
+  - persistent index pages on disk (index segments)
+  - meta file:
+    - `... .btree.meta.json` (root / height / nextPageID)
+  - operations:
+    - `Insert(key, tid)`
+    - `SearchEqual(key)`
+    - `RangeScan(min, max)`
+  - supports duplicates (one key → multiple TIDs)
+
+---
+
+### 5) Database Layer
+
+- `novasql.Database`
+  - manages `DataDir` and per-table JSON metadata
+  - owns a **GlobalPool** similar to PostgreSQL `shared_buffers`
+  - caches `views` per `"Dir|Base"`
+
+Implemented:
+
+- `CreateTable`, `OpenTable`
+- `DropTable` (flush + drop cached pages before deleting files)
+- `RenameTable` (flush + drop cached pages before renaming files)
+- `ListTables`
+- `FlushAllPools`, `Close`
+
+Not implemented:
+
+- `ListDatabase`, `SelectDatabase`, `DropDatabase`
+
+---
+
+## ⚠️ What is NOT synced yet (expected)
+
+### Index maintenance is NOT automatically synchronized with heap mutations
+
+- Insert: in your manual tests you call `tree.Insert(...)` explicitly
+- Update redirect:
+  - index still points to old TID → `Get(oldTID)` follows redirect ✅
+- Delete:
+  - if you delete from heap only, the index entry becomes **dangling** ❌
+  - manual CASE C shows this (expected)
+
+✅ Conclusion: heap CRUD and index CRUD are still **separate** right now.  
+Now keep synchronization in the **planner/executor** (execution layer) to make it logically atomic.
+
+---
+
+## ✅ Recommended behavior (for now)
+
+- If want “table + index correctness”:
+  - Insert: executor does `heap.Insert` → get `tid` → `index.Insert(key, tid)`
+  - Delete: executor does `index.Delete(key, tid)` → `heap.Delete(tid)`
+  - Update:
+    - if key unchanged: index entry can stay (redirect keeps old TID valid)
+    - if key changes: remove old entry + insert new entry
 
 ---
 
@@ -155,7 +234,6 @@ At a high level:
 
 ```
 
-
 ## 🤔 Challenges & Future Exploration
 
 The journey of building NovaSQL has revealed many areas for future exploration:
@@ -170,6 +248,7 @@ The journey of building NovaSQL has revealed many areas for future exploration:
 ## 🙏 Acknowledgements
 
 This project draws inspiration from various database systems and educational resources, including:
+
 - SQLite
 - PostgreSQL
 - CMU Database Systems Course
