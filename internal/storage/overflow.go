@@ -37,13 +37,11 @@ type OverflowRef struct {
 //   - we reuse [0..3] as nextFree pointer for free-list
 //   - used=0
 type OverflowManager struct {
-	sm *StorageManager
 	fs FileSet
 }
 
-func NewOverflowManager(sm *StorageManager, fs FileSet) *OverflowManager {
+func NewOverflowManager(fs FileSet) *OverflowManager {
 	return &OverflowManager{
-		sm: sm,
 		fs: fs,
 	}
 }
@@ -364,4 +362,3 @@ func (ovf *OverflowManager) allocDataPage(
 	newNextAlloc = nextAlloc + 1
 	return pageID, newFreeHead, newNextAlloc, nil
 }
-

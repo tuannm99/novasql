@@ -17,8 +17,8 @@ func TestOverflow_WriteRead_RoundTrip(t *testing.T) {
 		Base: "ovf_test",
 	}
 
-	sm := NewStorageManager()
-	ovf := NewOverflowManager(sm, fs)
+	// sm := NewStorageManager()
+	ovf := NewOverflowManager(fs)
 
 	// Payload bigger than one overflow page to force multi-page chain.
 	// PageSize = 8192, header ~8 bytes, available ~8184.

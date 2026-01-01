@@ -13,17 +13,23 @@ import (
 
 // newTestTable creates a new heap.Table bound to a temp directory and returns it
 // along with the underlying StorageManager and FileSet for reopen tests.
+//
+// IMPORTANT: Uses GlobalPool + View(fs) to match shared buffer design.
 func newTestTable(t *testing.T, base string) (*Table, *storage.StorageManager, storage.LocalFileSet) {
 	t.Helper()
 
 	dir := t.TempDir()
 
 	sm := storage.NewStorageManager()
+
+	// Shared buffers (Postgres-like)
+	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+
 	fs := storage.LocalFileSet{
 		Dir:  dir,
 		Base: base,
 	}
-	bp := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
+	bp := gp.View(fs)
 
 	// Simple schema: (id INT64, name TEXT, active BOOL)
 	schema := record.Schema{
@@ -38,7 +44,7 @@ func newTestTable(t *testing.T, base string) (*Table, *storage.StorageManager, s
 		Dir:  dir,
 		Base: base + "_ovf",
 	}
-	ovf := storage.NewOverflowManager(sm, overflowFS)
+	ovf := storage.NewOverflowManager(overflowFS)
 
 	// New table with pageCount=0, Insert will lazily create pages.
 	tbl := NewTable(base, schema, sm, fs, bp, ovf, 0)
@@ -72,12 +78,15 @@ func TestTable_InsertAndScan_Persisted(t *testing.T) {
 	// Flush all dirty pages to disk via buffer pool.
 	require.NoError(t, tbl.BP.FlushAll())
 
-	// Reopen table: new buffer pool, page count from storage.
+	// Reopen table: page count from storage.
 	pageCount, err := sm.CountPages(fs)
 	require.NoError(t, err)
 	require.Greater(t, pageCount, uint32(0))
 
-	bp2 := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
+	// NEW: reopen using a new GlobalPool (like a new process)
+	gp2 := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	bp2 := gp2.View(fs)
+
 	schema := tbl.Schema // reuse schema
 
 	// Rebuild overflow manager using the same naming convention.
@@ -85,7 +94,7 @@ func TestTable_InsertAndScan_Persisted(t *testing.T) {
 		Dir:  fs.Dir,
 		Base: fs.Base + "_ovf",
 	}
-	ovf := storage.NewOverflowManager(sm, overflowFS)
+	ovf := storage.NewOverflowManager(overflowFS)
 
 	tbl2 := NewTable("users", schema, sm, fs, bp2, ovf, pageCount)
 
@@ -146,18 +155,20 @@ func TestTable_UpdateRedirect_ScanAndGet(t *testing.T) {
 	// Flush to make sure redirect state is persisted.
 	require.NoError(t, tbl.BP.FlushAll())
 
-	// Reopen the table with a fresh buffer pool and page count from storage.
+	// Reopen the table with a fresh GlobalPool and page count from storage.
 	pageCount, err := sm.CountPages(fs)
 	require.NoError(t, err)
 
-	bp2 := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
+	gp2 := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	bp2 := gp2.View(fs)
+
 	schema := tbl.Schema
 
 	overflowFS := storage.LocalFileSet{
 		Dir:  fs.Dir,
 		Base: fs.Base + "_ovf",
 	}
-	ovf := storage.NewOverflowManager(sm, overflowFS)
+	ovf := storage.NewOverflowManager(overflowFS)
 
 	tbl2 := NewTable("users_update", schema, sm, fs, bp2, ovf, pageCount)
 
@@ -212,14 +223,16 @@ func TestTable_DeleteAndScan(t *testing.T) {
 	pageCount, err := sm.CountPages(fs)
 	require.NoError(t, err)
 
-	bp2 := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
+	gp2 := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	bp2 := gp2.View(fs)
+
 	schema := tbl.Schema
 
 	overflowFS := storage.LocalFileSet{
 		Dir:  fs.Dir,
 		Base: fs.Base + "_ovf",
 	}
-	ovf := storage.NewOverflowManager(sm, overflowFS)
+	ovf := storage.NewOverflowManager(overflowFS)
 
 	tbl2 := NewTable("users_delete", schema, sm, fs, bp2, ovf, pageCount)
 

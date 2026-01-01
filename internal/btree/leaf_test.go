@@ -11,6 +11,7 @@ import (
 )
 
 // newTestLeaf creates a LeafNode backed by a fresh page (pageID=0) in a temp dir.
+// Uses GlobalPool + FileSet View so it works with shared buffer design.
 func newTestLeaf(t *testing.T) (*LeafNode, *storage.StorageManager, storage.LocalFileSet, bufferpool.Manager) {
 	t.Helper()
 
@@ -20,7 +21,12 @@ func newTestLeaf(t *testing.T) (*LeafNode, *storage.StorageManager, storage.Loca
 		Dir:  dir,
 		Base: "leaf_test",
 	}
-	bp := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
+
+	// Shared buffer
+	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+
+	// Relation-scoped view (implements bufferpool.Manager)
+	bp := gp.View(fs)
 
 	p, err := bp.GetPage(0)
 	require.NoError(t, err)

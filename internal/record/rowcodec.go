@@ -27,7 +27,7 @@ var (
 	ErrSchemaMismatchNotBool      = errors.New("rowcodec: schema/values mismatch not bool")
 	ErrSchemaMismatchNotFloat64   = errors.New("rowcodec: schema/values mismatch not float64")
 	ErrSchemaMismatchNotText      = errors.New("rowcodec: schema/values mismatch not text")
-	ErrSchemaMismatchNotBytes     = errors.New("rowcodec: schema/values mismatch not int32")
+	ErrSchemaMismatchNotBytes     = errors.New("rowcodec: schema/values mismatch not bytes")
 
 	ErrBadBuffer       = errors.New("rowcodec: buffer underflow/overflow")
 	ErrVarTooLong      = errors.New("rowcodec: variable length exceeds u16")

@@ -14,16 +14,21 @@ import (
 	"github.com/tuannm99/novasql/internal/storage"
 )
 
-func newTestHeapTable(t *testing.T) (*heap.Table, *storage.StorageManager, storage.LocalFileSet) {
+func newTestHeapTable(t *testing.T) (*heap.Table, *storage.StorageManager, *bufferpool.GlobalPool) {
 	t.Helper()
 
 	dir := t.TempDir()
 	sm := storage.NewStorageManager()
+
+	// Shared/global buffer pool (Postgres-like).
+	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+
+	// Heap relation (users)
 	fs := storage.LocalFileSet{
 		Dir:  dir,
 		Base: "users",
 	}
-	bp := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
+	bp := gp.View(fs)
 
 	schema := record.Schema{
 		Cols: []record.Column{
@@ -37,22 +42,25 @@ func newTestHeapTable(t *testing.T) (*heap.Table, *storage.StorageManager, stora
 		Dir:  fs.Dir,
 		Base: fs.Base + "_ovf",
 	}
-	ovf := storage.NewOverflowManager(sm, overflowFS)
+	ovf := storage.NewOverflowManager(overflowFS)
 
 	tbl := heap.NewTable("users", schema, sm, fs, bp, ovf, 0)
-	return tbl, sm, fs
+	t.Cleanup(func() { _ = tbl.Close() })
+
+	return tbl, sm, gp
 }
 
 func TestTree_InsertAndSearchEqual(t *testing.T) {
-	tbl, sm, _ := newTestHeapTable(t)
+	tbl, sm, gp := newTestHeapTable(t)
 
 	idxFS := storage.LocalFileSet{
 		Dir:  t.TempDir(),
 		Base: "users_id_idx",
 	}
-	idxBP := bufferpool.NewPool(sm, idxFS, bufferpool.DefaultCapacity)
+	idxBP := gp.View(idxFS)
 
 	tree := NewTree(sm, idxFS, idxBP)
+	t.Cleanup(func() { _ = tree.Close() })
 
 	for i := 1; i <= 10; i++ {
 		tid, err := tbl.Insert([]any{
@@ -82,14 +90,16 @@ func TestTree_InsertAndSearchEqual(t *testing.T) {
 }
 
 func TestTree_InsertOutOfOrderShouldError(t *testing.T) {
-	tbl, sm, _ := newTestHeapTable(t)
+	tbl, sm, gp := newTestHeapTable(t)
 
 	idxFS := storage.LocalFileSet{
 		Dir:  t.TempDir(),
 		Base: "users_id_idx",
 	}
-	idxBP := bufferpool.NewPool(sm, idxFS, bufferpool.DefaultCapacity)
+	idxBP := gp.View(idxFS)
+
 	tree := NewTree(sm, idxFS, idxBP)
+	t.Cleanup(func() { _ = tree.Close() })
 
 	// Insert first key = 10
 	tid1, err := tbl.Insert([]any{
@@ -114,14 +124,16 @@ func TestTree_InsertOutOfOrderShouldError(t *testing.T) {
 }
 
 func TestTree_InsertAndSearchEqual_Duplicates(t *testing.T) {
-	tbl, sm, _ := newTestHeapTable(t)
+	tbl, sm, gp := newTestHeapTable(t)
 
 	idxFS := storage.LocalFileSet{
 		Dir:  t.TempDir(),
 		Base: "users_id_idx",
 	}
-	idxBP := bufferpool.NewPool(sm, idxFS, bufferpool.DefaultCapacity)
+	idxBP := gp.View(idxFS)
+
 	tree := NewTree(sm, idxFS, idxBP)
+	t.Cleanup(func() { _ = tree.Close() })
 
 	// Insert 2 rows with same id = 5
 	tid1, err := tbl.Insert([]any{
@@ -172,14 +184,16 @@ func TestTree_InsertAndSearchEqual_Duplicates(t *testing.T) {
 }
 
 func TestTree_RangeScan(t *testing.T) {
-	tbl, sm, _ := newTestHeapTable(t)
+	tbl, sm, gp := newTestHeapTable(t)
 
 	idxFS := storage.LocalFileSet{
 		Dir:  t.TempDir(),
 		Base: "users_id_idx",
 	}
-	idxBP := bufferpool.NewPool(sm, idxFS, bufferpool.DefaultCapacity)
+	idxBP := gp.View(idxFS)
+
 	tree := NewTree(sm, idxFS, idxBP)
+	t.Cleanup(func() { _ = tree.Close() })
 
 	// Insert 1..10 (sorted)
 	for i := 1; i <= 10; i++ {
@@ -214,14 +228,16 @@ func TestTree_RangeScan(t *testing.T) {
 }
 
 func TestTree_RangeScan_EmptyAndReverse(t *testing.T) {
-	tbl, sm, _ := newTestHeapTable(t)
+	tbl, sm, gp := newTestHeapTable(t)
 
 	idxFS := storage.LocalFileSet{
 		Dir:  t.TempDir(),
 		Base: "users_id_idx",
 	}
-	idxBP := bufferpool.NewPool(sm, idxFS, bufferpool.DefaultCapacity)
+	idxBP := gp.View(idxFS)
+
 	tree := NewTree(sm, idxFS, idxBP)
+	t.Cleanup(func() { _ = tree.Close() })
 
 	// Insert 1..5
 	for i := 1; i <= 5; i++ {
@@ -247,14 +263,16 @@ func TestTree_RangeScan_EmptyAndReverse(t *testing.T) {
 
 // Optional: stress test to ensure tree can grow height > 1 and still work.
 func TestTree_HeightIncreasesWithManyInserts(t *testing.T) {
-	tbl, sm, _ := newTestHeapTable(t)
+	tbl, sm, gp := newTestHeapTable(t)
 
 	idxFS := storage.LocalFileSet{
 		Dir:  t.TempDir(),
 		Base: "users_id_idx",
 	}
-	idxBP := bufferpool.NewPool(sm, idxFS, bufferpool.DefaultCapacity)
+	idxBP := gp.View(idxFS)
+
 	tree := NewTree(sm, idxFS, idxBP)
+	t.Cleanup(func() { _ = tree.Close() })
 
 	// Insert enough rows to force multiple splits (likely height >= 2).
 	const n = 2000
@@ -293,21 +311,20 @@ func TestManual_BTreeDeepInsert(t *testing.T) {
 	})
 	slog.SetDefault(slog.New(handler))
 
-	// Reuse helper to create a heap table + storage manager.
-	tbl, sm, _ := newTestHeapTable(t)
+	tbl, sm, gp := newTestHeapTable(t)
 
-	// Create an index FileSet + buffer pool for the B+Tree.
 	idxFS := storage.LocalFileSet{
 		Dir:  t.TempDir(),
 		Base: "users_id_idx",
 	}
-	idxBP := bufferpool.NewPool(sm, idxFS, bufferpool.DefaultCapacity)
-	tree := NewTree(sm, idxFS, idxBP)
+	idxBP := gp.View(idxFS)
 
-	const n = 3000 // stress size; adjust as needed
+	tree := NewTree(sm, idxFS, idxBP)
+	defer func() { _ = tree.Close() }()
+
+	const n = 3000
 
 	for i := 1; i <= n; i++ {
-		// Insert row into heap table.
 		tid, err := tbl.Insert([]any{
 			int64(i),
 			fmt.Sprintf("user-%d", i),
@@ -315,7 +332,6 @@ func TestManual_BTreeDeepInsert(t *testing.T) {
 		})
 		require.NoError(t, err, "heap insert failed at i=%d", i)
 
-		// Insert into B+Tree.
 		err = tree.Insert(int64(i), tid)
 		if err != nil {
 			t.Fatalf("btree insert failed at key=%d: err=%v (height=%d root=%d)",
@@ -323,11 +339,10 @@ func TestManual_BTreeDeepInsert(t *testing.T) {
 		}
 	}
 
-	// Small sanity check on a few keys.
 	for _, k := range []int64{1, int64(n / 2), int64(n)} {
 		tids, err := tree.SearchEqual(k)
 		require.NoError(t, err)
-		require.Len(t, tids, 1, "expected exactly one TID for key=%d", k)
+		require.Len(t, tids, 1)
 
 		row, err := tbl.Get(tids[0])
 		require.NoError(t, err)
@@ -342,7 +357,9 @@ func TestLeaf_AppendOutOfOrderIsAllowed(t *testing.T) {
 		Dir:  dir,
 		Base: "idx",
 	}
-	bp := bufferpool.NewPool(sm, fs, bufferpool.DefaultCapacity)
+
+	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	bp := gp.View(fs)
 
 	p, err := bp.GetPage(0)
 	require.NoError(t, err)

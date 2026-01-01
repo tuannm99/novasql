@@ -2,7 +2,6 @@ package btree
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -30,12 +29,3 @@ func DropIndex(lfs storage.LocalFileSet) error {
 
 	return nil
 }
-
-func dropIndexFileSet(fs storage.FileSet) error {
-	lfs, ok := fs.(storage.LocalFileSet)
-	if !ok {
-		return fmt.Errorf("btree: DropIndex only supports LocalFileSet for now")
-	}
-	return DropIndex(lfs)
-}
-

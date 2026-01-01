@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/record"
@@ -15,6 +16,8 @@ const (
 	rowKindInline   = byte(0)
 	rowKindOverflow = byte(1)
 )
+
+var ErrTableClosed = errors.New("heap: table is closed")
 
 // Table represents heap file logic: name, schema, StorageManager, FileSet, PageCount.
 type Table struct {
@@ -31,6 +34,8 @@ type Table struct {
 	// pageCountHook is a best-effort callback invoked when PageCount changes
 	// (usually when allocating a new page).
 	pageCountHook func(pageCount uint32) error
+
+	closed atomic.Bool
 }
 
 func NewTable(
@@ -59,6 +64,10 @@ func (t *Table) SetPageCountHook(fn func(pageCount uint32) error) {
 
 // Insert inserts a new row into the heap.
 func (t *Table) Insert(values []any) (TID, error) {
+	if err := t.ensureOpen(); err != nil {
+		return TID{}, err
+	}
+
 	oldPageCount := t.PageCount
 
 	var pageID uint32
@@ -110,6 +119,10 @@ func (t *Table) Insert(values []any) (TID, error) {
 
 // Get reads a single row by TID.
 func (t *Table) Get(id TID) ([]any, error) {
+	if err := t.ensureOpen(); err != nil {
+		return nil, err
+	}
+
 	p, err := t.BP.GetPage(id.PageID)
 	if err != nil {
 		return nil, err
@@ -126,16 +139,22 @@ func (t *Table) Get(id TID) ([]any, error) {
 
 // Update updates a single row identified by TID.
 func (t *Table) Update(id TID, values []any) error {
+	if err := t.ensureOpen(); err != nil {
+		return err
+	}
+
 	p, err := t.BP.GetPage(id.PageID)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = t.BP.Unpin(p, false) }()
+
+	dirty := false
+	defer func() { _ = t.BP.Unpin(p, dirty) }()
 
 	// 1) capture old overflow ref (if any)
 	var oldRef *storage.OverflowRef
 	oldRaw, err := p.ReadTuple(int(id.Slot))
-	if err == nil && len(oldRaw) > 0 && oldRaw[0] == rowKindOverflow && len(oldRaw) >= 1+8 {
+	if err == nil && len(oldRaw) >= 1+8 && oldRaw[0] == rowKindOverflow {
 		first := bx.U32(oldRaw[1:5])
 		length := bx.U32(oldRaw[5:9])
 		ref := storage.OverflowRef{FirstPageID: first, Length: length}
@@ -152,20 +171,14 @@ func (t *Table) Update(id TID, values []any) error {
 	if err := p.UpdateTuple(int(id.Slot), tuple); err != nil {
 		return err
 	}
+	dirty = true
 
-	// mark dirty
-	_ = t.BP.Unpin(p, true)
-
-	// 4) free old overflow chain if it existed
+	// 4) free old overflow chain best-effort
 	if oldRef != nil && t.Overflow != nil && oldRef.Length > 0 {
 		if err := t.Overflow.Free(*oldRef); err != nil {
 			slog.Warn("heap: overflow free failed after update (leak accepted)",
-				"table", t.Name,
-				"pageID", id.PageID,
-				"slot", id.Slot,
-				"first", oldRef.FirstPageID,
-				"len", oldRef.Length,
-				"err", err,
+				"table", t.Name, "pageID", id.PageID, "slot", id.Slot,
+				"first", oldRef.FirstPageID, "len", oldRef.Length, "err", err,
 			)
 		}
 	}
@@ -175,39 +188,38 @@ func (t *Table) Update(id TID, values []any) error {
 
 // Delete marks a single row identified by TID as deleted.
 func (t *Table) Delete(id TID) error {
+	if err := t.ensureOpen(); err != nil {
+		return err
+	}
+
 	p, err := t.BP.GetPage(id.PageID)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = t.BP.Unpin(p, false) }()
+
+	dirty := false
+	defer func() { _ = t.BP.Unpin(p, dirty) }()
 
 	// capture overflow ref before delete
 	var oldRef *storage.OverflowRef
 	oldRaw, err := p.ReadTuple(int(id.Slot))
-	if err == nil && len(oldRaw) > 0 && oldRaw[0] == rowKindOverflow && len(oldRaw) >= 1+8 {
+	if err == nil && len(oldRaw) >= 1+8 && oldRaw[0] == rowKindOverflow {
 		first := bx.U32(oldRaw[1:5])
 		length := bx.U32(oldRaw[5:9])
 		ref := storage.OverflowRef{FirstPageID: first, Length: length}
 		oldRef = &ref
 	}
 
-	// delete slot
 	if err := p.DeleteTuple(int(id.Slot)); err != nil {
 		return err
 	}
+	dirty = true
 
-	_ = t.BP.Unpin(p, true)
-
-	// free overflow chain best-effort
 	if oldRef != nil && t.Overflow != nil && oldRef.Length > 0 {
 		if err := t.Overflow.Free(*oldRef); err != nil {
 			slog.Warn("heap: overflow free failed after delete (leak accepted)",
-				"table", t.Name,
-				"pageID", id.PageID,
-				"slot", id.Slot,
-				"first", oldRef.FirstPageID,
-				"len", oldRef.Length,
-				"err", err,
+				"table", t.Name, "pageID", id.PageID, "slot", id.Slot,
+				"first", oldRef.FirstPageID, "len", oldRef.Length, "err", err,
 			)
 		}
 	}
@@ -218,6 +230,10 @@ func (t *Table) Delete(id TID) error {
 // Scan iterates through all visible rows in the table.
 // It skips deleted slots (ErrBadSlot) and returns other errors.
 func (t *Table) Scan(fn func(id TID, row []any) error) error {
+	if err := t.ensureOpen(); err != nil {
+		return err
+	}
+
 	for pageID := uint32(0); pageID < t.PageCount; pageID++ {
 		p, err := t.BP.GetPage(pageID)
 		if err != nil {
@@ -350,17 +366,26 @@ func (t *Table) decodeRowWithOverflow(raw []byte) ([]any, error) {
 	}
 }
 
-// parseOverflowRefFromTuple parses a rowKindOverflow tuple payload into OverflowRef.
-// raw is the whole tuple stored in page, including kind byte.
-func parseOverflowRefFromTuple(raw []byte) (storage.OverflowRef, bool) {
-	if len(raw) < 1+8 {
-		return storage.OverflowRef{}, false
+func (t *Table) Close() error {
+	// idempotent
+	if t == nil {
+		return nil
 	}
-	if raw[0] != rowKindOverflow {
-		return storage.OverflowRef{}, false
+	if t.closed.Swap(true) {
+		return nil
 	}
-	payload := raw[1:]
-	first := bx.U32(payload[0:4])
-	length := bx.U32(payload[4:8])
-	return storage.OverflowRef{FirstPageID: first, Length: length}, true
+	if t.BP != nil {
+		return t.BP.FlushAll()
+	}
+	return nil
+}
+
+func (t *Table) ensureOpen() error {
+	if t == nil {
+		return ErrTableClosed
+	}
+	if t.closed.Load() {
+		return ErrTableClosed
+	}
+	return nil
 }

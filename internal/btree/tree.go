@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync/atomic"
 
 	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/heap"
@@ -14,6 +15,7 @@ import (
 // ErrInvalidTreeHeight is returned when the tree height is not supported by the
 // current implementation.
 var (
+	ErrTreeClosed                    = errors.New("btree: tree is closed")
 	ErrInvalidTreeHeight             = errors.New("btree: invalid tree height")
 	ErrInternalNodeHasNoEntries      = errors.New("btree: internal node has no entries")
 	ErrLeafHasNoKey                  = errors.New("btree: leaf has no keys")
@@ -61,6 +63,8 @@ type Tree struct {
 	// meta persistence
 	metaEnabled bool
 	metaPath    string
+
+	closed atomic.Bool
 }
 
 // NewTree creates a brand-new tree (no attempt to load persisted meta).
@@ -190,6 +194,10 @@ func (t *Tree) syncMeta() {
 // V2 enforces non-decreasing keys at the Tree level: if a key smaller than
 // the last inserted key is provided, ErrOutOfOrderInsert is returned.
 func (t *Tree) Insert(key KeyType, tid heap.TID) error {
+	if err := t.ensureOpen(); err != nil {
+		return err
+	}
+
 	slog.Debug("btree.Insert.start",
 		"key", key,
 		"tidPage", tid.PageID,
@@ -274,6 +282,10 @@ func (t *Tree) Insert(key KeyType, tid heap.TID) error {
 
 // SearchEqual returns all TIDs with the given key.
 func (t *Tree) SearchEqual(key KeyType) ([]heap.TID, error) {
+	if err := t.ensureOpen(); err != nil {
+		return nil, err
+	}
+
 	if t.Height < 1 {
 		return nil, ErrInvalidTreeHeight
 	}
@@ -328,6 +340,10 @@ func (t *Tree) SearchEqual(key KeyType) ([]heap.TID, error) {
 // RangeScan returns all TIDs with minKey <= key <= maxKey.
 // This is a simple full-tree range scan: it traverses all leaves.
 func (t *Tree) RangeScan(minKey, maxKey KeyType) ([]heap.TID, error) {
+	if err := t.ensureOpen(); err != nil {
+		return nil, err
+	}
+
 	var out []heap.TID
 	if t.Height < 1 {
 		return out, ErrInvalidTreeHeight
@@ -716,4 +732,24 @@ func (t *Tree) findMinKeyInSubtree(pageID uint32, level int) (KeyType, error) {
 		return 0, err
 	}
 	return t.findMinKeyInSubtree(child, level-1)
+}
+
+func (t *Tree) Close() error {
+	if t == nil {
+		return nil
+	}
+	if t.closed.Swap(true) {
+		return nil
+	}
+	if t.BP != nil {
+		return t.BP.FlushAll()
+	}
+	return nil
+}
+
+func (t *Tree) ensureOpen() error {
+	if t == nil || t.closed.Load() {
+		return ErrTreeClosed
+	}
+	return nil
 }

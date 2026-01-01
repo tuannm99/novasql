@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tuannm99/novasql/internal/btree"
@@ -55,7 +56,86 @@ var _ DatabaseOperation = (*Database)(nil)
 type Database struct {
 	DataDir string
 	SM      *storage.StorageManager
-	// TODO: catalog, shared buffer pool, lock manager, WAL manager, tx manager, ...
+
+	// Global shared buffer pool (like PostgreSQL shared_buffers).
+	bp *bufferpool.GlobalPool
+
+	// Optional cache of per-FileSet views (thin wrappers).
+	muViews sync.Mutex
+	views   map[string]bufferpool.Manager
+
+	closed bool
+}
+
+// NewDatabase creates a new database handle without touching the filesystem.
+func NewDatabase(dataDir string) *Database {
+	sm := storage.NewStorageManager()
+	return &Database{
+		DataDir: dataDir,
+		SM:      sm,
+		bp:      bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity),
+		views:   make(map[string]bufferpool.Manager),
+	}
+}
+
+func (db *Database) ensureOpen() error {
+	if db == nil || db.closed {
+		return ErrDatabaseClosed
+	}
+	return nil
+}
+
+func (db *Database) viewKey(fs storage.FileSet) (string, storage.LocalFileSet, bool) {
+	lfs, ok := fs.(storage.LocalFileSet)
+	if !ok {
+		return "", storage.LocalFileSet{}, false
+	}
+	return lfs.Dir + "|" + lfs.Base, lfs, true
+}
+
+func (db *Database) viewFor(fs storage.FileSet) bufferpool.Manager {
+	key, _, ok := db.viewKey(fs)
+	if !ok {
+		panic("novasql: unsupported FileSet for buffer view (requires LocalFileSet)")
+	}
+
+	db.muViews.Lock()
+	defer db.muViews.Unlock()
+
+	if v, ok := db.views[key]; ok {
+		return v
+	}
+	v := db.bp.View(fs) // returns Manager
+	db.views[key] = v
+	return v
+}
+
+func (db *Database) dropView(fs storage.FileSet) {
+	key, _, ok := db.viewKey(fs)
+	if !ok {
+		return
+	}
+	db.muViews.Lock()
+	delete(db.views, key)
+	db.muViews.Unlock()
+}
+
+// flushAndDropFileSet invalidates all cached pages of this FileSet in global pool.
+// IMPORTANT: call this before deleting/renaming segment files.
+func (db *Database) flushAndDropFileSet(fs storage.FileSet) error {
+	if db.bp == nil {
+		return nil
+	}
+	// Flush dirty pages of that relation.
+	if err := db.bp.FlushFileSet(fs); err != nil {
+		return err
+	}
+	// Drop cached pages (must not be pinned).
+	if err := db.bp.DropFileSet(fs); err != nil {
+		return err
+	}
+	db.dropView(fs)
+	return nil
 }
 
 // DropDatabase implements DatabaseOperation.
@@ -71,14 +151,6 @@ func (db *Database) ListDatabase() ([]string, error) {
 // SelectDatabase implements DatabaseOperation.
 func (db *Database) SelectDatabase(name string) ([]string, error) {
 	panic("unimplemented")
-}
-
-// NewDatabase creates a new database handle without touching the filesystem.
-func NewDatabase(dataDir string) *Database {
-	return &Database{
-		DataDir: dataDir,
-		SM:      storage.NewStorageManager(),
-	}
 }
 
 // tableDir returns the directory where table data and meta files live.
@@ -139,12 +211,15 @@ func (db *Database) readTableMeta(name string) (*TableMeta, error) {
 
 // CreateTable creates a new heap table and its associated overflow storage.
 func (db *Database) CreateTable(name string, schema record.Schema) (*heap.Table, error) {
+	if err := db.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if err := validateIdent(name); err != nil {
 		return nil, err
 	}
 
 	fs := db.tableFileSet(name)
-	bp := bufferpool.NewPool(db.SM, fs, bufferpool.DefaultCapacity)
+	bp := db.viewFor(fs)
 
 	now := time.Now()
 	meta := &TableMeta{
@@ -160,7 +235,7 @@ func (db *Database) CreateTable(name string, schema record.Schema) (*heap.Table,
 	}
 
 	overflowFS := db.overflowFileSet(name)
-	ovf := storage.NewOverflowManager(db.SM, overflowFS)
+	ovf := storage.NewOverflowManager(overflowFS)
 
 	tbl := heap.NewTable(name, schema, db.SM, fs, bp, ovf, 0)
 	tbl.SetPageCountHook(func(pc uint32) error {
@@ -171,11 +246,15 @@ func (db *Database) CreateTable(name string, schema record.Schema) (*heap.Table,
 
 // OpenTable opens an existing table using the on-disk metadata and page set.
 func (db *Database) OpenTable(name string) (*heap.Table, error) {
+	if err := db.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if err := validateIdent(name); err != nil {
 		return nil, err
 	}
 
 	fs := db.tableFileSet(name)
+	bp := db.viewFor(fs)
 
 	meta, err := db.readTableMeta(name)
 	if err != nil {
@@ -196,10 +275,8 @@ func (db *Database) OpenTable(name string) (*heap.Table, error) {
 		slog.Info("open table: error writing table meta", "err", err, "table", name)
 	}
 
-	bp := bufferpool.NewPool(db.SM, fs, bufferpool.DefaultCapacity)
-
 	overflowFS := db.overflowFileSet(name)
-	ovf := storage.NewOverflowManager(db.SM, overflowFS)
+	ovf := storage.NewOverflowManager(overflowFS)
 
 	tbl := heap.NewTable(name, meta.Schema, db.SM, fs, bp, ovf, pageCount)
 	tbl.SetPageCountHook(func(pc uint32) error {
@@ -210,7 +287,12 @@ func (db *Database) OpenTable(name string) (*heap.Table, error) {
 
 // DropTable removes all on-disk data for a table: indexes, heap pages, overflow pages,
 // and the metadata JSON file.
+//
+// IMPORTANT: flush/drop from global pool BEFORE deleting files.
 func (db *Database) DropTable(name string) error {
+	if err := db.ensureOpen(); err != nil {
+		return err
+	}
 	if err := validateIdent(name); err != nil {
 		return err
 	}
@@ -218,15 +300,45 @@ func (db *Database) DropTable(name string) error {
 		return err
 	}
 
-	// Best-effort: remove indexes first (so you don't leave garbage files).
-	if meta, err := db.readTableMeta(name); err == nil && meta != nil {
+	var meta *TableMeta
+	if m, err := db.readTableMeta(name); err == nil && m != nil {
+		meta = m
+	}
+
+	heapFS := storage.LocalFileSet{Dir: db.tableDir(), Base: name}
+	ovfFS := storage.LocalFileSet{Dir: db.tableDir(), Base: name + "_ovf"}
+
+	// 0) Invalidate cached pages first (so file ops are safe).
+	if err := db.flushAndDropFileSet(heapFS); err != nil {
+		return err
+	}
+	if err := db.flushAndDropFileSet(ovfFS); err != nil {
+		return err
+	}
+
+	if meta != nil {
 		for _, im := range meta.Indexes {
-			// Only btree for now
 			if im.Kind != IndexKindBTree {
 				continue
 			}
 			base := im.FileBase
-			// Backward compat (in case FileBase was empty in older meta):
+			if base == "" {
+				base = db.fmtIndexBase(name, im.Name)
+			}
+			idxFS := storage.LocalFileSet{Dir: db.tableDir(), Base: base}
+			if err := db.flushAndDropFileSet(idxFS); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 1) Drop indexes files first (best practice: avoid leaving garbage).
+	if meta != nil {
+		for _, im := range meta.Indexes {
+			if im.Kind != IndexKindBTree {
+				continue
+			}
+			base := im.FileBase
 			if base == "" {
 				base = db.fmtIndexBase(name, im.Name)
 			}
@@ -237,26 +349,28 @@ func (db *Database) DropTable(name string) error {
 		}
 	}
 
-	// Remove heap segments: name, name.1, ...
-	if err := storage.RemoveAllSegments(storage.LocalFileSet{Dir: db.tableDir(), Base: name}); err != nil {
+	// 2) Remove heap/ovf segments
+	if err := storage.RemoveAllSegments(heapFS); err != nil {
+		return err
+	}
+	if err := storage.RemoveAllSegments(ovfFS); err != nil {
 		return err
 	}
 
-	// Remove overflow segments: name_ovf, name_ovf.1, ...
-	if err := storage.RemoveAllSegments(storage.LocalFileSet{Dir: db.tableDir(), Base: name + "_ovf"}); err != nil {
-		return err
-	}
-
-	// Remove meta file
+	// 3) Remove meta file
 	metaPath := db.tableMetaPath(name)
 	if err := os.Remove(metaPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+
 	return nil
 }
 
 // ListTables scans the table directory for *.meta.json files and returns their metadata.
 func (db *Database) ListTables() ([]*TableMeta, error) {
+	if err := db.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(db.tableDir(), 0o755); err != nil {
 		return nil, err
 	}
@@ -284,12 +398,16 @@ func (db *Database) ListTables() ([]*TableMeta, error) {
 		}
 		metas = append(metas, meta)
 	}
-
 	return metas, nil
 }
 
 // RenameTable renames heap + ovf + meta + index segments and updates registry.
+//
+// IMPORTANT: flush/drop old cached pages BEFORE renaming files.
 func (db *Database) RenameTable(oldName, newName string) error {
+	if err := db.ensureOpen(); err != nil {
+		return err
+	}
 	if err := validateIdent(oldName); err != nil {
 		return err
 	}
@@ -312,6 +430,30 @@ func (db *Database) RenameTable(oldName, newName string) error {
 	meta, err := db.readTableMeta(oldName)
 	if err != nil {
 		return err
+	}
+
+	oldHeapFS := storage.LocalFileSet{Dir: db.tableDir(), Base: oldName}
+	oldOvfFS := storage.LocalFileSet{Dir: db.tableDir(), Base: oldName + "_ovf"}
+
+	// 0) Invalidate old cached pages (must succeed, else rename is unsafe).
+	if err := db.flushAndDropFileSet(oldHeapFS); err != nil {
+		return err
+	}
+	if err := db.flushAndDropFileSet(oldOvfFS); err != nil {
+		return err
+	}
+
+	for _, im := range meta.Indexes {
+		if im.Kind != IndexKindBTree {
+			continue
+		}
+		oldBase := im.FileBase
+		if oldBase == "" {
+			oldBase = db.fmtIndexBase(oldName, im.Name)
+		}
+		if err := db.flushAndDropFileSet(storage.LocalFileSet{Dir: db.tableDir(), Base: oldBase}); err != nil {
+			return err
+		}
 	}
 
 	// 1) Rename heap segments
@@ -340,7 +482,6 @@ func (db *Database) RenameTable(oldName, newName string) error {
 
 		oldBase := im.FileBase
 		if oldBase == "" {
-			// Backward compat if older meta didn't store FileBase
 			oldBase = db.fmtIndexBase(oldName, im.Name)
 		}
 		newBase := db.fmtIndexBase(newName, im.Name)
@@ -352,21 +493,30 @@ func (db *Database) RenameTable(oldName, newName string) error {
 			return err
 		}
 
+		// Drop any cached views for both names (best-effort).
+		db.dropView(storage.LocalFileSet{Dir: db.tableDir(), Base: oldBase})
+		db.dropView(storage.LocalFileSet{Dir: db.tableDir(), Base: newBase})
+
 		im.FileBase = newBase
 		im.UpdatedAt = now
 	}
 
-	// 4) Rename meta file itself (oldName.meta.json -> newName.meta.json)
+	// 4) Rename meta file itself
 	oldMetaPath := db.tableMetaPath(oldName)
 	if err := os.Rename(oldMetaPath, newMetaPath); err != nil {
-		// If rename fails here, you already renamed data files.
-		// It's ok for phase2; user can retry. But we return error.
 		return err
 	}
 
-	// 5) Rewrite meta content with new table name (atomic overwrite)
+	// 5) Rewrite meta content with new table name
 	meta.Name = newName
 	meta.UpdatedAt = now
+
+	// Drop views for old/new heap+ovf names
+	db.dropView(storage.LocalFileSet{Dir: db.tableDir(), Base: oldName})
+	db.dropView(storage.LocalFileSet{Dir: db.tableDir(), Base: newName})
+	db.dropView(storage.LocalFileSet{Dir: db.tableDir(), Base: oldName + "_ovf"})
+	db.dropView(storage.LocalFileSet{Dir: db.tableDir(), Base: newName + "_ovf"})
+
 	return db.writeTableMeta(meta)
 }
 
@@ -379,12 +529,48 @@ func (db *Database) syncTableMetaPageCountByName(name string, pageCount uint32) 
 	return db.writeTableMeta(meta)
 }
 
-// Close currently does nothing but is kept for future extension.
+// FlushAllPools flushes the entire shared buffer pool.
+// Name kept for backward compatibility.
+func (db *Database) FlushAllPools() error {
+	if err := db.ensureOpen(); err != nil {
+		return err
+	}
+	if db.bp == nil {
+		return nil
+	}
+	return db.bp.FlushAll()
+}
+
 func (db *Database) Close() error {
+	if db == nil {
+		return nil
+	}
+	if db.closed {
+		return nil
+	}
+
+	// Flush global pool (shared_buffers).
+	if db.bp != nil {
+		if err := db.bp.FlushAll(); err != nil {
+			return err
+		}
+	}
+
+	// Clear cached views.
+	db.muViews.Lock()
+	for k := range db.views {
+		delete(db.views, k)
+	}
+	db.muViews.Unlock()
+
+	db.closed = true
 	return nil
 }
 
 func (db *Database) UpdateTableSchema(name string, newSchema record.Schema) error {
+	if err := db.ensureOpen(); err != nil {
+		return err
+	}
 	meta, err := db.readTableMeta(name)
 	if err != nil {
 		return err
@@ -392,11 +578,13 @@ func (db *Database) UpdateTableSchema(name string, newSchema record.Schema) erro
 
 	meta.Schema = newSchema
 	meta.UpdatedAt = time.Now()
-
 	return db.writeTableMeta(meta)
 }
 
 func (db *Database) SyncTableMetaPageCount(tbl *heap.Table) error {
+	if err := db.ensureOpen(); err != nil {
+		return err
+	}
 	meta, err := db.readTableMeta(tbl.Name)
 	if err != nil {
 		return err

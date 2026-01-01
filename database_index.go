@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/tuannm99/novasql/internal/btree"
-	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/storage"
 )
 
@@ -35,7 +34,6 @@ type IndexMeta struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// ListIndexes returns registered indexes of a table.
 func (db *Database) ListIndexes(table string) ([]IndexMeta, error) {
 	if err := validateIdent(table); err != nil {
 		return nil, ErrIndexBadTable
@@ -75,6 +73,9 @@ func (db *Database) indexFileSet(table, index string) storage.LocalFileSet {
 // CreateBTreeIndex registers an index and creates a new BTree handle.
 // NOTE: This does not backfill existing rows yet (phase2 minimal).
 func (db *Database) CreateBTreeIndex(table, indexName, keyColumn string) (*btree.Tree, error) {
+	if err := db.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if err := validateIdent(table); err != nil {
 		return nil, ErrIndexBadTable
 	}
@@ -97,12 +98,10 @@ func (db *Database) CreateBTreeIndex(table, indexName, keyColumn string) (*btree
 	}
 
 	fs := db.indexFileSet(table, indexName)
-	bp := bufferpool.NewPool(db.SM, fs, bufferpool.DefaultCapacity)
+	bp := db.viewFor(fs)
 
-	// Create new tree (your phase2 meta persistence already handles meta file).
 	tree := btree.NewTree(db.SM, fs, bp)
 
-	// Register to table meta.
 	now := time.Now()
 	tmeta.Indexes = append(tmeta.Indexes, IndexMeta{
 		Name:      indexName,
@@ -119,8 +118,10 @@ func (db *Database) CreateBTreeIndex(table, indexName, keyColumn string) (*btree
 	return tree, nil
 }
 
-// OpenBTreeIndex opens an existing index by name (registry -> fileset -> OpenTree).
 func (db *Database) OpenBTreeIndex(table, indexName string) (*btree.Tree, error) {
+	if err := db.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if err := validateIdent(table); err != nil {
 		return nil, ErrIndexBadTable
 	}
@@ -141,14 +142,23 @@ func (db *Database) OpenBTreeIndex(table, indexName string) (*btree.Tree, error)
 		return nil, ErrIndexBadKind
 	}
 
-	fs := storage.LocalFileSet{Dir: db.tableDir(), Base: im.FileBase}
-	bp := bufferpool.NewPool(db.SM, fs, bufferpool.DefaultCapacity)
+	base := im.FileBase
+	if base == "" {
+		// Backward compat
+		base = db.fmtIndexBase(table, indexName)
+	}
+
+	fs := storage.LocalFileSet{Dir: db.tableDir(), Base: base}
+	bp := db.viewFor(fs)
 
 	return btree.OpenTree(db.SM, fs, bp)
 }
 
-// DropIndex drops on-disk index files AND removes it from registry.
+// IMPORTANT: flush/drop from global pool BEFORE deleting files.
 func (db *Database) DropIndex(table, indexName string) error {
+	if err := db.ensureOpen(); err != nil {
+		return err
+	}
 	if err := validateIdent(table); err != nil {
 		return ErrIndexBadTable
 	}
@@ -165,17 +175,27 @@ func (db *Database) DropIndex(table, indexName string) error {
 	if im == nil {
 		return ErrIndexNotFound
 	}
-
-	// 1) Drop files first (so if write meta fails, you can retry).
 	if im.Kind != IndexKindBTree {
 		return ErrIndexBadKind
 	}
-	fs := storage.LocalFileSet{Dir: db.tableDir(), Base: im.FileBase}
+
+	base := im.FileBase
+	if base == "" {
+		base = db.fmtIndexBase(table, indexName)
+	}
+	fs := storage.LocalFileSet{Dir: db.tableDir(), Base: base}
+
+	// Invalidate cached pages first.
+	if err := db.flushAndDropFileSet(fs); err != nil {
+		return err
+	}
+
+	// Drop index files.
 	if err := btree.DropIndex(fs); err != nil {
 		return err
 	}
 
-	// 2) Remove from registry.
+	// Remove registry entry.
 	last := len(tmeta.Indexes) - 1
 	tmeta.Indexes[pos] = tmeta.Indexes[last]
 	tmeta.Indexes = tmeta.Indexes[:last]
