@@ -57,3 +57,11 @@ func RenameAllSegments(oldLFS, newLFS LocalFileSet) error {
 	}
 	return nil
 }
+
+func FsKeyOf(fs FileSet) (string, LocalFileSet, bool) {
+	lfs, ok := fs.(LocalFileSet)
+	if !ok {
+		return "", LocalFileSet{}, false
+	}
+	return lfs.Dir + "|" + lfs.Base, lfs, true
+}

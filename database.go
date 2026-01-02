@@ -27,6 +27,7 @@ var (
 // DatabaseOperation defines the high-level operations that a Database supports.
 type DatabaseOperation interface {
 	ListDatabase() ([]string, error)
+	CreateDatabase(name string) error
 	SelectDatabase(name string) ([]string, error)
 	DropDatabase(name string) ([]string, error)
 
@@ -85,16 +86,8 @@ func (db *Database) ensureOpen() error {
 	return nil
 }
 
-func (db *Database) viewKey(fs storage.FileSet) (string, storage.LocalFileSet, bool) {
-	lfs, ok := fs.(storage.LocalFileSet)
-	if !ok {
-		return "", storage.LocalFileSet{}, false
-	}
-	return lfs.Dir + "|" + lfs.Base, lfs, true
-}
-
 func (db *Database) viewFor(fs storage.FileSet) bufferpool.Manager {
-	key, _, ok := db.viewKey(fs)
+	key, _, ok := storage.FsKeyOf(fs)
 	if !ok {
 		panic("novasql: unsupported FileSet for buffer view (requires LocalFileSet)")
 	}
@@ -111,7 +104,7 @@ func (db *Database) viewFor(fs storage.FileSet) bufferpool.Manager {
 }
 
 func (db *Database) dropView(fs storage.FileSet) {
-	key, _, ok := db.viewKey(fs)
+	key, _, ok := storage.FsKeyOf(fs)
 	if !ok {
 		return
 	}
@@ -138,19 +131,24 @@ func (db *Database) flushAndDropFileSet(fs storage.FileSet) error {
 	return nil
 }
 
-// DropDatabase implements DatabaseOperation.
-func (db *Database) DropDatabase(name string) ([]string, error) {
-	panic("unimplemented")
+func (db *Database) rootDir() string {
+	// Root is the parent directory of the current DataDir.
+	// Example: DataDir="./data/test/schema" -> root="./data/test"
+	p := filepath.Clean(db.DataDir)
+	return filepath.Dir(p)
 }
 
-// ListDatabase implements DatabaseOperation.
-func (db *Database) ListDatabase() ([]string, error) {
-	panic("unimplemented")
+func (db *Database) dbDir(name string) string {
+	return filepath.Join(db.rootDir(), name)
 }
 
-// SelectDatabase implements DatabaseOperation.
-func (db *Database) SelectDatabase(name string) ([]string, error) {
-	panic("unimplemented")
+func (db *Database) resetBufferPool() {
+	// Recreate shared buffer pool and drop all cached views.
+	db.bp = bufferpool.NewGlobalPool(db.SM, bufferpool.DefaultCapacity)
+
+	db.muViews.Lock()
+	db.views = make(map[string]bufferpool.Manager)
+	db.muViews.Unlock()
 }
 
 // tableDir returns the directory where table data and meta files live.
@@ -207,6 +205,196 @@ func (db *Database) readTableMeta(name string) (*TableMeta, error) {
 		return nil, err
 	}
 	return &meta, nil
+}
+
+func (db *Database) TableDir() string {
+	return db.tableDir()
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	tmp, err := os.CreateTemp(dir, base+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
+// fmtIndexBase returns LocalFileSet.Base for index segments.
+// Example: table="users", index="idx_age" -> "users__idx__idx_age"
+func (db *Database) fmtIndexBase(table, index string) string {
+	table = strings.TrimSpace(table)
+	index = strings.TrimSpace(index)
+	return table + "__idx__" + index
+}
+
+func validateIdent(name string) error {
+	if name == "" {
+		return ErrBadIdent
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return ErrBadIdent
+	}
+	if strings.Contains(name, "..") {
+		return ErrBadIdent
+	}
+	return nil
+}
+
+func (db *Database) BufferView(fs storage.FileSet) bufferpool.Manager {
+	return db.viewFor(fs)
+}
+
+func (db *Database) CreateDatabase(name string) error {
+	if err := db.ensureOpen(); err != nil {
+		return err
+	}
+	if err := validateIdent(name); err != nil {
+		return err
+	}
+
+	dir := db.dbDir(name)
+
+	// Create database directory and its tables subdir.
+	if err := os.MkdirAll(filepath.Join(dir, "tables"), 0o755); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DropDatabase implements DatabaseOperation.
+func (db *Database) DropDatabase(name string) ([]string, error) {
+	if err := db.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if err := validateIdent(name); err != nil {
+		return nil, err
+	}
+
+	target := db.dbDir(name)
+	cur := filepath.Clean(db.DataDir)
+
+	// Flush shared buffers first.
+	if db.bp != nil {
+		if err := db.bp.FlushAll(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Remove the database directory.
+	if err := os.RemoveAll(target); err != nil {
+		return nil, err
+	}
+
+	// If dropping the currently selected DB, keep DB handle usable:
+	// recreate the current DataDir "tables" (or switch to root as fallback).
+	if filepath.Clean(target) == cur {
+		_ = os.MkdirAll(filepath.Join(cur, "tables"), 0o755)
+		db.resetBufferPool()
+	}
+
+	return db.ListDatabase()
+}
+
+// ListDatabase implements DatabaseOperation.
+func (db *Database) ListDatabase() ([]string, error) {
+	if err := db.ensureOpen(); err != nil {
+		return nil, err
+	}
+
+	root := db.rootDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]string, 0)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+
+		// Consider a directory a "database" if it contains a "tables" directory.
+		if st, err := os.Stat(filepath.Join(root, name, "tables")); err == nil && st.IsDir() {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+// SelectDatabase implements DatabaseOperation.
+func (db *Database) SelectDatabase(name string) ([]string, error) {
+	if err := db.ensureOpen(); err != nil {
+		return nil, err
+	}
+	if err := validateIdent(name); err != nil {
+		return nil, err
+	}
+
+	target := db.dbDir(name)
+
+	// Ensure target exists (or at least create it).
+	if err := os.MkdirAll(filepath.Join(target, "tables"), 0o755); err != nil {
+		return nil, err
+	}
+
+	// Flush current shared buffers before switching.
+	if db.bp != nil {
+		if err := db.bp.FlushAll(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Switch DataDir + reset caches/pool.
+	db.DataDir = target
+	db.resetBufferPool()
+
+	// Return list of tables in the selected DB.
+	metas, err := db.ListTables()
+	if err != nil {
+		return nil, err
+	}
+
+	names := make([]string, 0, len(metas))
+	for _, m := range metas {
+		if m != nil {
+			names = append(names, m.Name)
+		}
+	}
+	return names, nil
 }
 
 // CreateTable creates a new heap table and its associated overflow storage.
@@ -591,66 +779,4 @@ func (db *Database) SyncTableMetaPageCount(tbl *heap.Table) error {
 	}
 	meta.PageCount = tbl.PageCount
 	return db.writeTableMeta(meta)
-}
-
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	tmp, err := os.CreateTemp(dir, base+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-
-	ok := false
-	defer func() {
-		_ = tmp.Close()
-		if !ok {
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	ok = true
-	return nil
-}
-
-// fmtIndexBase returns LocalFileSet.Base for index segments.
-// Example: table="users", index="idx_age" -> "users__idx__idx_age"
-func (db *Database) fmtIndexBase(table, index string) string {
-	table = strings.TrimSpace(table)
-	index = strings.TrimSpace(index)
-	return table + "__idx__" + index
-}
-
-func validateIdent(name string) error {
-	if name == "" {
-		return ErrBadIdent
-	}
-	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
-			continue
-		}
-		return ErrBadIdent
-	}
-	if strings.Contains(name, "..") {
-		return ErrBadIdent
-	}
-	return nil
 }

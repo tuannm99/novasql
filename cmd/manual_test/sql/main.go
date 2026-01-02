@@ -19,15 +19,17 @@ func main() {
 
 	exec := executor.NewExecutor(db)
 
-	_, err := exec.ExecSQL(`CREATE TABLE users_sql (id INT, name TEXT)`)
+	rs, err := exec.ExecSQL(`CREATE TABLE users_sql (id INT, name TEXT)`)
 	if err != nil {
 		log.Fatalf("create table: %v", err)
 	}
+	fmt.Printf("❤❤❤ tuannm: [main.go][22][rs]: %+v\n", rs)
 
-	_, err = exec.ExecSQL(`INSERT INTO users_sql VALUES (1, 'user-1')`)
+	rs, err = exec.ExecSQL(`INSERT INTO users_sql VALUES (1, 'user-1')`)
 	if err != nil {
 		log.Fatalf("insert: %v", err)
 	}
+	fmt.Printf("❤❤❤ tuannm: [main.go][22][rs]: %+v\n", rs)
 
 	res, err := exec.ExecSQL(`SELECT * FROM users_sql`)
 	if err != nil {

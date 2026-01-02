@@ -70,17 +70,9 @@ func NewGlobalPool(sm *storage.StorageManager, capacity int) *GlobalPool {
 	}
 }
 
-func fsKeyOf(fs storage.FileSet) (string, storage.LocalFileSet, bool) {
-	lfs, ok := fs.(storage.LocalFileSet)
-	if !ok {
-		return "", storage.LocalFileSet{}, false
-	}
-	return lfs.Dir + "|" + lfs.Base, lfs, true
-}
-
 // GetPage pins and returns the page (fs,pageID).
 func (g *GlobalPool) GetPage(fs storage.FileSet, pageID uint32) (*storage.Page, error) {
-	key, lfs, ok := fsKeyOf(fs)
+	key, lfs, ok := storage.FsKeyOf(fs)
 	if !ok {
 		return nil, ErrUnsupportedFileSet
 	}
@@ -188,7 +180,7 @@ func (g *GlobalPool) Unpin(fs storage.FileSet, page *storage.Page, dirty bool) e
 	if page == nil {
 		return nil
 	}
-	key, _, ok := fsKeyOf(fs)
+	key, _, ok := storage.FsKeyOf(fs)
 	if !ok {
 		return ErrUnsupportedFileSet
 	}
@@ -238,7 +230,7 @@ func (g *GlobalPool) FlushAll() error {
 
 // FlushFileSet flushes dirty pages belonging to a single relation (FileSet).
 func (g *GlobalPool) FlushFileSet(fs storage.FileSet) error {
-	key, _, ok := fsKeyOf(fs)
+	key, _, ok := storage.FsKeyOf(fs)
 	if !ok {
 		return ErrUnsupportedFileSet
 	}
@@ -266,7 +258,7 @@ func (g *GlobalPool) FlushFileSet(fs storage.FileSet) error {
 // IMPORTANT: This must be called before deleting/renaming underlying files.
 // If any page is pinned, ErrPagePinned is returned.
 func (g *GlobalPool) DropFileSet(fs storage.FileSet) error {
-	key, _, ok := fsKeyOf(fs)
+	key, _, ok := storage.FsKeyOf(fs)
 	if !ok {
 		return ErrUnsupportedFileSet
 	}

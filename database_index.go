@@ -65,7 +65,7 @@ func (db *Database) hasColumn(meta *TableMeta, col string) bool {
 
 func (db *Database) indexFileSet(table, index string) storage.LocalFileSet {
 	return storage.LocalFileSet{
-		Dir:  db.tableDir(),
+		Dir:  db.TableDir(),
 		Base: db.fmtIndexBase(table, index),
 	}
 }
@@ -148,7 +148,7 @@ func (db *Database) OpenBTreeIndex(table, indexName string) (*btree.Tree, error)
 		base = db.fmtIndexBase(table, indexName)
 	}
 
-	fs := storage.LocalFileSet{Dir: db.tableDir(), Base: base}
+	fs := storage.LocalFileSet{Dir: db.TableDir(), Base: base}
 	bp := db.viewFor(fs)
 
 	return btree.OpenTree(db.SM, fs, bp)
@@ -183,7 +183,7 @@ func (db *Database) DropIndex(table, indexName string) error {
 	if base == "" {
 		base = db.fmtIndexBase(table, indexName)
 	}
-	fs := storage.LocalFileSet{Dir: db.tableDir(), Base: base}
+	fs := storage.LocalFileSet{Dir: db.TableDir(), Base: base}
 
 	// Invalidate cached pages first.
 	if err := db.flushAndDropFileSet(fs); err != nil {
