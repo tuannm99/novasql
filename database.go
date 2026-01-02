@@ -55,8 +55,13 @@ var _ DatabaseOperation = (*Database)(nil)
 
 // Database is a lightweight handle for a NovaSQL database directory.
 type Database struct {
+	// Example: "/data"
+	WorkDir string
+	// DataDir is the currently selected database directory.
+	// Example: "/data/testdb"
 	DataDir string
-	SM      *storage.StorageManager
+
+	SM *storage.StorageManager
 
 	// Global shared buffer pool (like PostgreSQL shared_buffers).
 	bp *bufferpool.GlobalPool
@@ -69,14 +74,25 @@ type Database struct {
 }
 
 // NewDatabase creates a new database handle without touching the filesystem.
-func NewDatabase(dataDir string) *Database {
+// workDir is the root directory that contains databases.
+func NewDatabase(workDir string) *Database {
 	sm := storage.NewStorageManager()
-	return &Database{
-		DataDir: dataDir,
+
+	root := filepath.Clean(workDir)
+	cur := filepath.Join(root, "default")
+
+	db := &Database{
+		WorkDir: root,
+		DataDir: cur,
 		SM:      sm,
 		bp:      bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity),
 		views:   make(map[string]bufferpool.Manager),
 	}
+
+	// Ensure default db exists
+	_ = os.MkdirAll(filepath.Join(cur, "tables"), 0o755)
+
+	return db
 }
 
 func (db *Database) ensureOpen() error {
@@ -132,10 +148,8 @@ func (db *Database) flushAndDropFileSet(fs storage.FileSet) error {
 }
 
 func (db *Database) rootDir() string {
-	// Root is the parent directory of the current DataDir.
-	// Example: DataDir="./data/test/schema" -> root="./data/test"
-	p := filepath.Clean(db.DataDir)
-	return filepath.Dir(p)
+	// Root is exactly the configured workdir (WorkDir).
+	return filepath.Clean(db.WorkDir)
 }
 
 func (db *Database) dbDir(name string) string {
@@ -303,7 +317,7 @@ func (db *Database) DropDatabase(name string) ([]string, error) {
 		return nil, err
 	}
 
-	target := db.dbDir(name)
+	target := filepath.Clean(db.dbDir(name))
 	cur := filepath.Clean(db.DataDir)
 
 	// Flush shared buffers first.
@@ -319,9 +333,10 @@ func (db *Database) DropDatabase(name string) ([]string, error) {
 	}
 
 	// If dropping the currently selected DB, keep DB handle usable:
-	// recreate the current DataDir "tables" (or switch to root as fallback).
-	if filepath.Clean(target) == cur {
-		_ = os.MkdirAll(filepath.Join(cur, "tables"), 0o755)
+	// switch back to "<workdir>/default".
+	if target == cur {
+		db.DataDir = db.dbDir("default")
+		_ = os.MkdirAll(filepath.Join(db.DataDir, "tables"), 0o755)
 		db.resetBufferPool()
 	}
 

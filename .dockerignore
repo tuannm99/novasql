@@ -1,0 +1,22 @@
+.git
+**/.DS_Store
+
+# build outputs
+bin
+out
+dist
+
+# local data
+data
+data_test
+*.db
+
+# editor / temp
+.vscode
+.idea
+*.swp
+*.tmp
+
+# go test cache
+**/*.test
+

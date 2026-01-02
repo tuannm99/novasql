@@ -2,6 +2,7 @@ package novasql
 
 import (
 	"errors"
+	"os"
 	"time"
 
 	"github.com/tuannm99/novasql/internal/btree"
@@ -35,6 +36,9 @@ type IndexMeta struct {
 }
 
 func (db *Database) ListIndexes(table string) ([]IndexMeta, error) {
+	if err := db.ensureOpen(); err != nil {
+		return nil, err
+	}
 	if err := validateIdent(table); err != nil {
 		return nil, ErrIndexBadTable
 	}
@@ -42,7 +46,7 @@ func (db *Database) ListIndexes(table string) ([]IndexMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	return meta.Indexes, nil
+	return append([]IndexMeta(nil), meta.Indexes...), nil
 }
 
 func (db *Database) findIndexMeta(meta *TableMeta, indexName string) (int, *IndexMeta) {
@@ -97,6 +101,7 @@ func (db *Database) CreateBTreeIndex(table, indexName, keyColumn string) (*btree
 		return nil, ErrIndexExists
 	}
 
+	_ = os.MkdirAll(db.TableDir(), 0o755)
 	fs := db.indexFileSet(table, indexName)
 	bp := db.viewFor(fs)
 
@@ -199,7 +204,6 @@ func (db *Database) DropIndex(table, indexName string) error {
 	last := len(tmeta.Indexes) - 1
 	tmeta.Indexes[pos] = tmeta.Indexes[last]
 	tmeta.Indexes = tmeta.Indexes[:last]
-	tmeta.UpdatedAt = time.Now()
 
 	return db.writeTableMeta(tmeta)
 }

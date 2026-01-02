@@ -1,18 +1,15 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/tuannm99/novasql"
 	"github.com/tuannm99/novasql/internal/btree"
 	"github.com/tuannm99/novasql/internal/heap"
 	"github.com/tuannm99/novasql/internal/record"
-	"github.com/tuannm99/novasql/internal/storage"
 )
 
 func main() {
@@ -89,7 +86,7 @@ func main() {
 	must(tbl.Update(tid7, []any{int64(7), longName, true}))
 	must(db.FlushAllPools())
 
-	// Index vẫn trả về tid7 (vì mình không đổi key)
+	// Index vẫn trả về tid7 (vì không đổi key)
 	gotTIDs, err = tree.SearchEqual(7)
 	must(err)
 	mustf(len(gotTIDs) == 1, "expected 1 tid for key=7 after update, got=%d", len(gotTIDs))
@@ -180,14 +177,4 @@ func mustf(ok bool, format string, args ...any) {
 	if !ok {
 		panic(fmt.Sprintf(format, args...))
 	}
-}
-
-// Optional helper if you want to assert error types; keep here for quick manual debugging.
-func isBadSlot(err error) bool {
-	return errors.Is(err, storage.ErrBadSlot)
-}
-
-// Sleep a bit if you want to watch logs in slow motion.
-func nap(ms int) {
-	time.Sleep(time.Duration(ms) * time.Millisecond)
 }

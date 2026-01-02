@@ -4,23 +4,21 @@ import (
 	"fmt"
 
 	"github.com/spf13/viper"
-	"github.com/tuannm99/novasql/internal/storage"
 )
 
 type NovaSqlConfig struct {
+	AppName string `mapstructure:"app_name"`
+
 	Storage struct {
 		Mode     string `mapstructure:"mode"`
-		File     string `mapstructure:"file"`
+		Workdir  string `mapstructure:"workdir"`
 		PageSize int    `mapstructure:"page_size"`
 	} `mapstructure:"storage"`
+
 	Server struct {
 		Port  int  `mapstructure:"port"`
 		Debug bool `mapstructure:"debug"`
 	} `mapstructure:"server"`
-}
-
-type Config struct {
-	Mode storage.StorageMode
 }
 
 func LoadConfig(path string) (*NovaSqlConfig, error) {
