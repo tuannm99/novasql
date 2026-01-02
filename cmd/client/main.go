@@ -2,292 +2,421 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/tuannm99/novasql/internal/sql/executor"
-	"github.com/tuannm99/novasql/sqlclient"
+	sqlwire "github.com/tuannm99/novasql/server/novasqlwire"
 )
 
-func main() {
-	var (
-		addr    = flag.String("addr", envOr("NOVASQL_ADDR", "127.0.0.1:8866"), "server address host:port")
-		timeout = flag.Duration("timeout", 5*time.Second, "dial timeout")
-		execSQL = flag.String("e", "", "execute one statement and exit")
-		file    = flag.String("f", "", "execute statements from file and exit")
-		noRepl  = flag.Bool("no-repl", false, "do not start interactive repl (use with -e or -f)")
-		autoSem = flag.Bool("auto-semicolon", true, "auto append ';' when missing (client-side convenience)")
-	)
-	flag.Parse()
+// ---- TCP client (sync) ----
 
-	c, err := sqlclient.Dial(*addr, *timeout)
-	if err != nil {
-		fatalf("dial %s: %v", *addr, err)
-	}
-	defer func() { _ = c.Close() }()
-
-	// -e
-	if strings.TrimSpace(*execSQL) != "" {
-		stmt := strings.TrimSpace(*execSQL)
-		if *autoSem {
-			stmt = ensureSemicolon(stmt)
-		}
-		if err := runOne(c, stmt); err != nil {
-			fatalf("%v", err)
-		}
-		return
-	}
-
-	// -f
-	if strings.TrimSpace(*file) != "" {
-		b, err := os.ReadFile(*file)
-		if err != nil {
-			fatalf("read file: %v", err)
-		}
-		sqls := splitStatements(string(b))
-		for _, s := range sqls {
-			stmt := strings.TrimSpace(s)
-			if stmt == "" {
-				continue
-			}
-			if *autoSem {
-				stmt = ensureSemicolon(stmt)
-			}
-			if err := runOne(c, stmt); err != nil {
-				fatalf("%v", err)
-			}
-		}
-		return
-	}
-
-	if *noRepl {
-		return
-	}
-
-	// Interactive REPL
-	fmt.Printf("novasql> connected to %s\n", *addr)
-	fmt.Println("Type SQL ending with ';'. Commands: \\q, \\help")
-	repl(c, *autoSem)
+type Client struct {
+	conn net.Conn
+	mu   sync.Mutex
+	id   atomic.Uint64
 }
 
-func repl(c *sqlclient.Client, autoSemicolon bool) {
-	in := bufio.NewReader(os.Stdin)
-	var buf strings.Builder
-
-	for {
-		if buf.Len() == 0 {
-			fmt.Print("novasql> ")
-		} else {
-			fmt.Print("...> ")
-		}
-
-		line, err := in.ReadString('\n')
-		if err != nil {
-			fmt.Println()
-			return
-		}
-		line = strings.TrimRight(line, "\r\n")
-
-		trim := strings.TrimSpace(line)
-		if buf.Len() == 0 && strings.HasPrefix(trim, `\`) {
-			switch trim {
-			case `\q`, `\quit`, `\exit`:
-				return
-			case `\help`:
-				fmt.Println("Commands:")
-				fmt.Println("  \\q | \\quit | \\exit  Quit")
-				fmt.Println("  \\help              Show this help")
-				continue
-			default:
-				fmt.Printf("unknown command: %s\n", trim)
-				continue
-			}
-		}
-
-		buf.WriteString(line)
-		buf.WriteString("\n")
-
-		// If user ended statement
-		if strings.Contains(line, ";") {
-			stmt := strings.TrimSpace(buf.String())
-
-			// take first statement until first ';' for now (simple)
-			one, rest := takeFirstStatement(stmt)
-			if strings.TrimSpace(one) != "" {
-				if autoSemicolon {
-					one = ensureSemicolon(one)
-				}
-				if err := runOne(c, one); err != nil {
-					fmt.Printf("error: %v\n", err)
-				}
-			}
-
-			buf.Reset()
-			if strings.TrimSpace(rest) != "" {
-				// if user pasted multiple statements, execute the rest as batch
-				more := splitStatements(rest)
-				for _, s := range more {
-					s = strings.TrimSpace(s)
-					if s == "" {
-						continue
-					}
-					if autoSemicolon {
-						s = ensureSemicolon(s)
-					}
-					if err := runOne(c, s); err != nil {
-						fmt.Printf("error: %v\n", err)
-						break
-					}
-				}
-			}
-		}
+func Dial(addr string, timeout time.Duration) (*Client, error) {
+	d := net.Dialer{Timeout: timeout}
+	c, err := d.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
 	}
+	return &Client{conn: c}, nil
 }
 
-func runOne(c *sqlclient.Client, sql string) error {
-	res, err := c.Exec(sql)
-	if err != nil {
-		return fmt.Errorf("%s -> %w", oneLine(sql), err)
+func (c *Client) Close() error {
+	if c == nil || c.conn == nil {
+		return nil
 	}
-	printResult(res)
+	return c.conn.Close()
+}
+
+func (c *Client) Exec(sql string) (*executor.Result, error) {
+	if c == nil || c.conn == nil {
+		return nil, fmt.Errorf("sqlclient: nil client")
+	}
+
+	reqID := c.id.Add(1)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	req := sqlwire.ExecuteRequest{ID: reqID, SQL: sql}
+	if err := sqlwire.WriteFrame(c.conn, req); err != nil {
+		return nil, err
+	}
+
+	var resp sqlwire.ExecuteResponse
+	if err := sqlwire.ReadFrame(c.conn, &resp); err != nil {
+		return nil, err
+	}
+	if resp.ID != reqID {
+		return nil, fmt.Errorf("sqlclient: response id mismatch: got=%d want=%d", resp.ID, reqID)
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	return resp.Result, nil
+}
+
+// ---- History (own file) ----
+
+type History struct {
+	path  string
+	lines []string
+}
+
+func NewHistory(path string) *History {
+	return &History{path: path}
+}
+
+func (h *History) Load(max int) error {
+	if h.path == "" {
+		return nil
+	}
+	f, err := os.Open(h.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		s := strings.TrimSpace(sc.Text())
+		if s == "" {
+			continue
+		}
+		h.lines = append(h.lines, s)
+		if max > 0 && len(h.lines) > max {
+			h.lines = h.lines[len(h.lines)-max:]
+		}
+	}
+	return sc.Err()
+}
+
+func (h *History) Append(stmt string) error {
+	stmt = strings.TrimSpace(stmt)
+	if stmt == "" || h.path == "" {
+		return nil
+	}
+
+	// store single-line; collapse whitespace/newlines
+	stmt = compactOneLine(stmt)
+
+	// ensure dir exists
+	if err := os.MkdirAll(filepath.Dir(h.path), 0o755); err != nil {
+		return err
+	}
+
+	f, err := os.OpenFile(h.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := fmt.Fprintln(f, stmt); err != nil {
+		return err
+	}
+	h.lines = append(h.lines, stmt)
 	return nil
 }
 
+func (h *History) Print(last int) {
+	if last <= 0 || last > len(h.lines) {
+		last = len(h.lines)
+	}
+	start := len(h.lines) - last
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(h.lines); i++ {
+		fmt.Printf("%5d  %s\n", i+1, h.lines[i])
+	}
+}
+
+func compactOneLine(s string) string {
+	// replace newlines/tabs with spaces, then collapse multiple spaces
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	s = strings.TrimSpace(s)
+
+	var b strings.Builder
+	b.Grow(len(s))
+	space := false
+	for _, r := range s {
+		if r == ' ' {
+			if !space {
+				b.WriteByte(' ')
+				space = true
+			}
+			continue
+		}
+		space = false
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// ---- REPL helpers ----
+
+// statementComplete checks if we have a terminating ';' outside single quotes.
+func statementComplete(buf string) bool {
+	inQuote := false
+	escaped := false
+
+	for _, r := range buf {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '\'' {
+			inQuote = !inQuote
+			continue
+		}
+		if r == ';' && !inQuote {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeStmt(buf string) string {
+	// keep original semicolon requirement as parser wants
+	// but trim leading/trailing whitespace
+	return strings.TrimSpace(buf)
+}
+
+func isMetaCommand(line string) bool {
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "\\") ||
+		line == "quit" || line == "exit"
+}
+
 func printResult(res *executor.Result) {
-	// DML
 	if len(res.Columns) == 0 {
-		fmt.Printf("OK (%d rows)\n", res.AffectedRows)
+		// DDL/DML
+		fmt.Printf("OK (%d affected)\n", res.AffectedRows)
 		return
 	}
 
-	// SELECT
-	rows := res.Rows
 	cols := res.Columns
+	rows := res.Rows
 
-	// compute widths
-	w := make([]int, len(cols))
-	for i := range cols {
-		w[i] = len(cols[i])
+	// 1) compute widths
+	widths := make([]int, len(cols))
+	for i, c := range cols {
+		widths[i] = len(c)
 	}
-	for _, r := range rows {
+	for _, row := range rows {
 		for i := range cols {
-			s := fmtCell(cellAt(r, i))
-			if len(s) > w[i] {
-				w[i] = len(s)
+			var s string
+			if i < len(row) && row[i] != nil {
+				s = fmt.Sprintf("%v", row[i])
+			} else {
+				s = "NULL"
+			}
+			if len(s) > widths[i] {
+				widths[i] = len(s)
 			}
 		}
 	}
 
-	sep := func() {
-		fmt.Print("+")
+	// helper to print a row
+	printRow := func(values []string) {
 		for i := range cols {
-			fmt.Print(strings.Repeat("-", w[i]+2))
-			fmt.Print("+")
+			if i > 0 {
+				fmt.Print(" | ")
+			}
+			fmt.Print(padRight(values[i], widths[i]))
 		}
 		fmt.Println()
 	}
 
-	sep()
-	fmt.Print("|")
+	// 2) header
+	hdr := make([]string, len(cols))
+	copy(hdr, cols)
+	printRow(hdr)
+
+	// 3) separator ----+----
 	for i := range cols {
-		fmt.Printf(" %-*s |", w[i], cols[i])
+		if i > 0 {
+			fmt.Print("-+-")
+		}
+		fmt.Print(strings.Repeat("-", widths[i]))
 	}
 	fmt.Println()
-	sep()
 
-	for _, r := range rows {
-		fmt.Print("|")
+	// 4) rows
+	for _, row := range rows {
+		out := make([]string, len(cols))
 		for i := range cols {
-			fmt.Printf(" %-*s |", w[i], fmtCell(cellAt(r, i)))
+			if i < len(row) && row[i] != nil {
+				out[i] = fmt.Sprintf("%v", row[i])
+			} else {
+				out[i] = "NULL"
+			}
 		}
-		fmt.Println()
+		printRow(out)
 	}
-	sep()
-	fmt.Printf("(%d rows)\n", len(rows))
+
+	fmt.Printf("(%d rows)\n", res.AffectedRows)
 }
 
-func cellAt(row []any, i int) any {
-	if i < 0 || i >= len(row) {
-		return nil
-	}
-	return row[i]
-}
-
-func fmtCell(v any) string {
-	if v == nil {
-		return "NULL"
-	}
-	switch x := v.(type) {
-	case string:
-		return x
-	case bool:
-		if x {
-			return "true"
-		}
-		return "false"
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
-
-func ensureSemicolon(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
+func padRight(s string, w int) string {
+	if len(s) >= w {
 		return s
 	}
-	if strings.HasSuffix(s, ";") {
-		return s
-	}
-	return s + ";"
+	return s + strings.Repeat(" ", w-len(s))
 }
 
-// splitStatements: split by ';' (naive, no quote escaping)
-func splitStatements(s string) []string {
-	parts := strings.Split(s, ";")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
+func defaultHistoryPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ".novasql_history"
+	}
+	return filepath.Join(home, ".novasql_history")
+}
+
+func main() {
+	var (
+		addr       = flag.String("addr", "127.0.0.1:8866", "server address")
+		timeout    = flag.Duration("timeout", 3*time.Second, "dial timeout")
+		histPath   = flag.String("history", defaultHistoryPath(), "history file path")
+		histMax    = flag.Int("history-max", 2000, "max history lines loaded into memory")
+		oneShotSQL = flag.String("c", "", "execute one SQL and exit (must end with ';')")
+	)
+	flag.Parse()
+
+	cli, err := Dial(*addr, *timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dial: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = cli.Close() }()
+
+	// one-shot mode
+	if strings.TrimSpace(*oneShotSQL) != "" {
+		res, err := cli.Exec(*oneShotSQL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		printResult(res)
+		return
+	}
+
+	h := NewHistory(*histPath)
+	_ = h.Load(*histMax)
+
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "novasql> ",
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "readline: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = rl.Close() }()
+
+	// preload history into readline (so ↑ works immediately)
+	for _, line := range h.lines {
+		rl.SaveHistory(line) // add to in-memory history
+	}
+
+	var buf strings.Builder
+
+	fmt.Printf("connected to %s\n", *addr)
+	fmt.Println("type \\help for help")
+
+	for {
+		line, err := rl.Readline()
+		if err == readline.ErrInterrupt {
+			// Ctrl+C clears current buffer
+			if buf.Len() > 0 {
+				buf.Reset()
+				rl.SetPrompt("novasql> ")
+				continue
+			}
+			fmt.Println("^C")
 			continue
 		}
-		out = append(out, p+";")
-	}
-	return out
-}
+		if err != nil {
+			// EOF
+			fmt.Println()
+			return
+		}
 
-// takeFirstStatement returns (firstStmtIncludingSemicolon, restAfterFirst)
-func takeFirstStatement(s string) (string, string) {
-	idx := strings.Index(s, ";")
-	if idx < 0 {
-		return s, ""
-	}
-	first := strings.TrimSpace(s[:idx+1])
-	rest := strings.TrimSpace(s[idx+1:])
-	return first, rest
-}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 
-func oneLine(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.ReplaceAll(s, "\n", " ")
-	s = strings.ReplaceAll(s, "\t", " ")
-	for strings.Contains(s, "  ") {
-		s = strings.ReplaceAll(s, "  ", " ")
-	}
-	return s
-}
+		// meta commands
+		if isMetaCommand(line) {
+			switch {
+			case line == "\\q" || line == "quit" || line == "exit":
+				return
+			case line == "\\help":
+				fmt.Println(`meta commands:
+  \q | quit | exit       quit
+  \history               print history
+  \help                  show help
 
-func envOr(k, def string) string {
-	v := strings.TrimSpace(os.Getenv(k))
-	if v == "" {
-		return def
-	}
-	return v
-}
+sql:
+  end statement with ';' (parser requires it)
+  multiline is supported (CLI will wait until ';')`)
+			case line == "\\history":
+				h.Print(50)
+			default:
+				fmt.Printf("unknown command: %s\n", line)
+			}
+			continue
+		}
 
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
+		// accumulate sql
+		if buf.Len() > 0 {
+			buf.WriteByte(' ')
+		}
+		buf.WriteString(line)
+
+		if !statementComplete(buf.String()) {
+			rl.SetPrompt("...> ")
+			continue
+		}
+
+		stmt := normalizeStmt(buf.String())
+		buf.Reset()
+		rl.SetPrompt("novasql> ")
+
+		// persist history by executed statement
+		_ = h.Append(stmt)
+		rl.SaveHistory(compactOneLine(stmt))
+
+		res, err := cli.Exec(stmt)
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+			continue
+		}
+		printResult(res)
+	}
 }
