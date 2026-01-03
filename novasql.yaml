@@ -1,7 +1,7 @@
 app_name: novasql
 storage:
-  mode: embedded
-  workdir: /tmp/novasql # for now only this line work
+  mode: classic
+  workdir: /data/novasql # for now only this line work
   page_size: 8192
 server:
   port: 8866
