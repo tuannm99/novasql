@@ -113,6 +113,10 @@ func (t *Table) Insert(values []any) (TID, error) {
 			}
 		}
 
+		err = t.Flush()
+		if err != nil {
+			return TID{}, err
+		}
 		return TID{PageID: pageID, Slot: uint16(slot)}, nil
 	}
 }
@@ -183,7 +187,7 @@ func (t *Table) Update(id TID, values []any) error {
 		}
 	}
 
-	return nil
+	return t.Flush()
 }
 
 // Delete marks a single row identified by TID as deleted.
@@ -224,7 +228,7 @@ func (t *Table) Delete(id TID) error {
 		}
 	}
 
-	return nil
+	return t.Flush()
 }
 
 // Scan iterates through all visible rows in the table.
@@ -266,7 +270,7 @@ func (t *Table) Scan(fn func(id TID, row []any) error) error {
 
 		_ = t.BP.Unpin(p, false)
 	}
-	return nil
+	return t.Flush()
 }
 
 func (t *Table) Flush() error {

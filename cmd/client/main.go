@@ -340,7 +340,7 @@ func main() {
 
 	// preload history into readline (so ↑ works immediately)
 	for _, line := range h.lines {
-		rl.SaveHistory(line) // add to in-memory history
+		_ = rl.SaveHistory(line) // add to in-memory history
 	}
 
 	var buf strings.Builder
@@ -373,10 +373,10 @@ func main() {
 
 		// meta commands
 		if isMetaCommand(line) {
-			switch {
-			case line == "\\q" || line == "quit" || line == "exit":
+			switch line {
+			case "\\q", "quit", "exit":
 				return
-			case line == "\\help":
+			case "\\help":
 				fmt.Println(`meta commands:
   \q | quit | exit       quit
   \history               print history
@@ -385,7 +385,7 @@ func main() {
 sql:
   end statement with ';' (parser requires it)
   multiline is supported (CLI will wait until ';')`)
-			case line == "\\history":
+			case "\\history":
 				h.Print(50)
 			default:
 				fmt.Printf("unknown command: %s\n", line)
@@ -410,7 +410,7 @@ sql:
 
 		// persist history by executed statement
 		_ = h.Append(stmt)
-		rl.SaveHistory(compactOneLine(stmt))
+		_ = rl.SaveHistory(compactOneLine(stmt))
 
 		res, err := cli.Exec(stmt)
 		if err != nil {

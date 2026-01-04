@@ -18,6 +18,7 @@ func main() {
 
 	// _, _ = c.Exec("CREATE DATABASE testdb;")
 	_, _ = c.Exec("USE testdb;")
+	fmt.Printf("❤❤❤ tuannm: [main.go][20][]")
 	// _, _ = c.Exec("CREATE TABLE users (id INT, name TEXT, active BOOL);")
 	// _, _ = c.Exec("INSERT INTO users VALUES (1, 'a', true);")
 
