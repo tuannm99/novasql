@@ -1,11 +1,26 @@
-# [01] NovaSQL
+# [#01] NovaSQL
 
 NovaSQL is a small database engine written in Go, built as a learning project to understand how databases work under the hood.
 
-> Note: NovaSQL was built quickly as a learning prototype (70% were AI-assisted). The codebase has become harder to maintain than I’d like.
-> I’m stopping development here and starting a new project from scratch — fully hand-written, with a simpler architecture and stricter standards.
+> NovaSQL was built rapidly as a learning prototype (≈80% AI-assisted). After adding the BTree, WAL, and MVCC (which drove me crazy), the codebase became too complex and overwhelming for me to maintain at my current level. At this point, indexes and transactions aren’t working correctly, and I’m stuck on the Query Processor layer. I’m stopping here and restarting from scratch—fully hand-written, with a simpler architecture and stricter standards.
 
 ---
+
+## Lesson Learned
+
+### What to do when starting a new project
+
+- I should start with a simpler architecture—one that’s easy to extend later. For example: begin with a single-file storage layout (not split like PostgreSQL), and avoid adding a Buffer Pool, Btree too early.
+- Every core algorithm should be written by hand so that I can fully understand it.
+
+### What I learned
+
+- How a database represents data on disk
+- How the CPU reads bytes
+- How pages, slots, and tuples are laid out
+- How indexing works (B-Tree basics: splits, merges, and search)
+- How WAL works at a high level (redo/undo, checkpoints)
+- How MVCC works conceptually (snapshots, visibility rules)
 
 ## Run
 
@@ -189,7 +204,7 @@ At a high level:
 
 ---
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 This project draws inspiration from various database systems and educational resources, including:
 
