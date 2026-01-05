@@ -25,6 +25,13 @@ var (
 	ErrSplitRequiredMoreThanTwoPages = errors.New("btree: internal split would require more than two pages")
 )
 
+// Index is a minimal interface BTree should satisfy to be used by planner/executor.
+type Index interface {
+	Insert(key KeyType, tid heap.TID) error
+	SearchEqual(key KeyType) ([]heap.TID, error)
+	RangeScan(minKey, maxKey KeyType) ([]heap.TID, error)
+}
+
 // Meta holds logical information about the tree. Later this can be persisted
 // alongside table metadata if you want durable index catalogs.
 type Meta struct {
@@ -75,6 +82,12 @@ func NewTree(sm *storage.StorageManager, fs storage.FileSet, bp bufferpool.Manag
 	t.Root = 0
 	t.Height = 1
 	t.nextPageID = 1 // page 0 reserved as root
+
+	root, err := t.BP.GetPage(0)
+	if err == nil {
+		root.Reset(0)
+		_ = t.BP.Unpin(root, true)
+	}
 
 	if mp, ok := metaPathForFileSet(fs); ok {
 		t.metaEnabled = true
@@ -170,6 +183,10 @@ func (t *Tree) allocPage() (uint32, *storage.Page, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+
+	// This is a freshly allocated page for the index.
+	// Always reset to avoid reusing garbage/old content.
+	p.Reset(pid)
 	return pid, p, nil
 }
 
@@ -402,40 +419,41 @@ func (t *Tree) insertIntoLeaf(
 	if err != nil {
 		return 0, false, 0, 0, err
 	}
+
+	// Ensure we always unpin exactly once.
+	dirtyP := false
+	defer func() {
+		_ = t.BP.Unpin(p, dirtyP)
+	}()
+
 	leaf := &LeafNode{Page: p}
 
-	// Load existing physical entries, append new, then sort.
 	entries, err := leaf.readEntries()
 	if err != nil {
-		_ = t.BP.Unpin(p, false)
 		return 0, false, 0, 0, err
 	}
+
 	entries = append(entries, leafEntry{key: key, tid: tid})
 	sortLeafEntries(entries)
 
-	// Compute max entries per empty leaf page (fixed tuple size).
-	// Total size = Header + N*SlotSize + N*LeafEntrySize <= PageSize
-	maxPerPage := (storage.PageSize - storage.HeaderSize) / (storage.SlotSize + LeafEntrySize)
+	maxPerPage := maxLeafEntriesPerPage()
 	if maxPerPage <= 0 {
-		_ = t.BP.Unpin(p, false)
 		return 0, false, 0, 0, fmt.Errorf("btree: leaf page capacity is zero")
 	}
 
 	total := len(entries)
 
-	// Case 1: fits in one page -> rebuild in place (sorted physical order)
+	// Case 1: fits -> rebuild in-place
 	if total <= maxPerPage {
 		if err := leaf.rebuildSorted(entries); err != nil {
-			_ = t.BP.Unpin(p, false)
 			return 0, false, 0, 0, err
 		}
-		_ = t.BP.Unpin(p, true)
+		dirtyP = true
 		return pageID, false, 0, 0, nil
 	}
 
-	// Case 2: split into two leaves
+	// Case 2: split into 2 pages
 	if total < 2 {
-		_ = t.BP.Unpin(p, false)
 		return 0, false, 0, 0, ErrCannotSplitLeafGreaterThanTwo
 	}
 
@@ -443,31 +461,31 @@ func (t *Tree) insertIntoLeaf(
 	leftEnts := entries[:mid]
 	rightEnts := entries[mid:]
 
-	// Rebuild left in-place (reuse old pageID)
+	// Rebuild left in-place
 	if err := leaf.rebuildSorted(leftEnts); err != nil {
-		_ = t.BP.Unpin(p, false)
 		return 0, false, 0, 0, err
 	}
+	dirtyP = true
 
 	// Allocate right page
 	rightID, rightPage, err := t.allocPage()
 	if err != nil {
-		_ = t.BP.Unpin(p, true) // left already rebuilt
 		return 0, false, 0, 0, err
 	}
-	rightLeaf := &LeafNode{Page: rightPage}
 
+	rightDirty := false
+	defer func() {
+		// If we return before marking success, unpin as clean to avoid dirty garbage.
+		_ = t.BP.Unpin(rightPage, rightDirty)
+	}()
+
+	rightLeaf := &LeafNode{Page: rightPage}
 	if err := rightLeaf.rebuildSorted(rightEnts); err != nil {
-		_ = t.BP.Unpin(p, true)
-		_ = t.BP.Unpin(rightPage, false)
 		return 0, false, 0, 0, err
 	}
+	rightDirty = true
 
 	rightMin := rightEnts[0].key
-
-	_ = t.BP.Unpin(p, true)
-	_ = t.BP.Unpin(rightPage, true)
-
 	return pageID, true, rightMin, rightID, nil
 }
 
@@ -483,17 +501,22 @@ func (t *Tree) insertIntoInternal(
 		return 0, false, 0, 0, ErrInvalidTreeHeight
 	}
 
-	// Load current internal node.
 	p, err := t.BP.GetPage(pageID)
 	if err != nil {
 		return 0, false, 0, 0, err
 	}
+
+	// Ensure we always unpin exactly once.
+	dirtyP := false
+	defer func() {
+		_ = t.BP.Unpin(p, dirtyP)
+	}()
+
 	node := &InternalNode{Page: p}
 
-	// Choose child to descend into using minKey semantics.
+	// Choose child.
 	idx, childID, err := node.findChildIndex(key)
 	if err != nil {
-		_ = t.BP.Unpin(p, false)
 		return 0, false, 0, 0, err
 	}
 
@@ -505,131 +528,98 @@ func (t *Tree) insertIntoInternal(
 		"childID", childID,
 	)
 
-	// Recursively insert into child subtree.
+	// Recurse.
 	childNewID, childSplit, childRightMin, childRightID, err := t.insertAt(childID, level-1, key, tid)
 	if err != nil {
-		_ = t.BP.Unpin(p, false)
 		return 0, false, 0, 0, err
 	}
 
-	// Read all existing entries.
 	entries, err := node.readEntries()
 	if err != nil {
-		_ = t.BP.Unpin(p, false)
 		return 0, false, 0, 0, err
 	}
-	_ = t.BP.Unpin(p, false) // old page is not used anymore (copy-on-write)
 
-	// Update pointer of the child where we descended.
 	if idx < 0 || idx >= len(entries) {
 		return 0, false, 0, 0, ErrInternalChildIdxOutOfRange
 	}
 	entries[idx].child = childNewID
 
-	// If the child split, we add an extra (minKey, childID) entry.
 	if childSplit {
-		slog.Debug("btree.insertIntoInternal.child_split",
-			"parentPageID", pageID,
-			"childIndex", idx,
-			"childRightMin", childRightMin,
-			"childRightID", childRightID,
-		)
 		entries = append(entries, internalEntry{
 			key:   childRightMin,
 			child: childRightID,
 		})
 	}
 
-	// Keep entries sorted by key to preserve minKey semantics.
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].key < entries[j].key
+	// Keep sorted by (key, child) for deterministic order.
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].key != entries[j].key {
+			return entries[i].key < entries[j].key
+		}
+		return entries[i].child < entries[j].child
 	})
 
-	// Decide whether we can rebuild as a single internal page or must split.
-	leftID, leftPage, err := t.allocPage()
-	if err != nil {
-		return 0, false, 0, 0, err
-	}
-	leftNode := &InternalNode{Page: leftPage}
-
-	// Compute maximum number of entries one empty internal page can hold.
-	// (initial FreeSpace / (entry size + slot header)).
-	maxPerPage := leftPage.FreeSpace() / (InternalEntrySize + storage.SlotSize)
+	maxPerPage := maxInternalEntriesPerPage()
 	if maxPerPage <= 0 {
-		_ = t.BP.Unpin(leftPage, false)
 		return 0, false, 0, 0, ErrInternalNodePageHasZeroCap
 	}
 
 	total := len(entries)
 
-	// Case 1: everything fits into one page → rebuild a single internal node.
+	// Case 1: fits -> rebuild IN-PLACE on the SAME page.
 	if total <= maxPerPage {
+		p.Reset(pageID)
+		in := &InternalNode{Page: p}
 		for _, e := range entries {
-			if err := leftNode.AppendEntry(e.key, e.child); err != nil {
-				_ = t.BP.Unpin(leftPage, false)
+			if err := in.AppendEntry(e.key, e.child); err != nil {
 				return 0, false, 0, 0, err
 			}
 		}
-		_ = t.BP.Unpin(leftPage, true)
-		slog.Debug("btree.insertIntoInternal.single_page",
-			"oldPageID", pageID,
-			"newPageID", leftID,
-			"numEntries", total,
-		)
-		return leftID, false, 0, 0, nil
+		dirtyP = true
+		return pageID, false, 0, 0, nil
 	}
 
-	// Case 2: we need to split into two internal nodes.
-	rightID, rightPage, err := t.allocPage()
-	if err != nil {
-		_ = t.BP.Unpin(leftPage, false)
-		return 0, false, 0, 0, err
-	}
-	rightNode := &InternalNode{Page: rightPage}
-
-	// Split entries into two groups, with per-page capacity respected.
+	// Case 2: split -> reuse current page as LEFT, allocate RIGHT only.
 	leftCount := min(total/2, maxPerPage)
 	rightCount := total - leftCount
 	if rightCount > maxPerPage {
-		_ = t.BP.Unpin(leftPage, false)
-		_ = t.BP.Unpin(rightPage, false)
 		return 0, false, 0, 0, ErrSplitRequiredMoreThanTwoPages
 	}
 
 	leftEnts := entries[:leftCount]
 	rightEnts := entries[leftCount:]
-
-	for _, e := range leftEnts {
-		if err := leftNode.AppendEntry(e.key, e.child); err != nil {
-			_ = t.BP.Unpin(leftPage, false)
-			_ = t.BP.Unpin(rightPage, false)
-			return 0, false, 0, 0, err
-		}
-	}
-	for _, e := range rightEnts {
-		if err := rightNode.AppendEntry(e.key, e.child); err != nil {
-			_ = t.BP.Unpin(leftPage, false)
-			_ = t.BP.Unpin(rightPage, false)
-			return 0, false, 0, 0, err
-		}
-	}
-
 	rightMin := rightEnts[0].key
 
-	_ = t.BP.Unpin(leftPage, true)
-	_ = t.BP.Unpin(rightPage, true)
+	// Rebuild left into current page p.
+	p.Reset(pageID)
+	leftNode := &InternalNode{Page: p}
+	for _, e := range leftEnts {
+		if err := leftNode.AppendEntry(e.key, e.child); err != nil {
+			return 0, false, 0, 0, err
+		}
+	}
+	dirtyP = true
 
-	slog.Debug("btree.insertIntoInternal.split_done",
-		"oldPageID", pageID,
-		"leftID", leftID,
-		"rightID", rightID,
-		"rightMinKey", rightMin,
-		"totalEntries", total,
-		"leftCount", leftCount,
-		"rightCount", rightCount,
-	)
+	// Allocate right page.
+	rightID, rightPage, err := t.allocPage()
+	if err != nil {
+		return 0, false, 0, 0, err
+	}
 
-	return leftID, true, rightMin, rightID, nil
+	rightDirty := false
+	defer func() {
+		_ = t.BP.Unpin(rightPage, rightDirty)
+	}()
+
+	rightNode := &InternalNode{Page: rightPage}
+	for _, e := range rightEnts {
+		if err := rightNode.AppendEntry(e.key, e.child); err != nil {
+			return 0, false, 0, 0, err
+		}
+	}
+	rightDirty = true
+
+	return pageID, true, rightMin, rightID, nil
 }
 
 // rangeScanAt recursively traverses the subtree rooted at (pageID, level)

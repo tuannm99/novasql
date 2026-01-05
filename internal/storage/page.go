@@ -15,6 +15,11 @@ const (
 	offSpecial = 10
 )
 
+// tail (special)
+const (
+	offPageLSN = PageSize - 8
+)
+
 // Slot flags (similar to Postgres)
 const (
 	SlotFlagNormal  uint16 = 0      // LP_NORMAL
@@ -74,6 +79,9 @@ func (p *Page) setUpper(v uint16)   { bx.PutU16At(p.Buf, offUpper, v) }
 func (p *Page) special() uint16     { return bx.U16At(p.Buf, offSpecial) }
 func (p *Page) setSpecial(v uint16) { bx.PutU16At(p.Buf, offSpecial, v) }
 
+func (p *Page) PageLSN() uint64       { return bx.U64At(p.Buf, offPageLSN) }
+func (p *Page) SetPageLSN(lsn uint64) { bx.PutU64At(p.Buf, offPageLSN, lsn) }
+
 func (p *Page) IsUninitialized() bool { return p.lower() == 0 && p.upper() == 0 }
 func (p *Page) FreeSpace() int        { return int(p.upper() - p.lower()) }
 func (p *Page) NumSlots() int         { return int(p.lower()-HeaderSize) / SlotSize }
@@ -85,15 +93,19 @@ func (p *Page) markRedirect(old, nw int) error {
 }
 
 func (p *Page) init(pageID uint32) {
-	// zero the page
 	for i := range p.Buf {
 		p.Buf[i] = 0
 	}
 	p.setFlags(0)
 	p.setPageID(pageID)
 	p.setLower(HeaderSize)
-	p.setUpper(PageSize)
-	p.setSpecial(PageSize) // unused for now
+
+	// reserve last 8 bytes for PageLSN
+	special := uint16(PageSize - 8)
+	p.setSpecial(special)
+	p.setUpper(special)
+
+	p.SetPageLSN(0)
 }
 
 // ---- slots ----

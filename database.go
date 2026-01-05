@@ -16,6 +16,7 @@ import (
 	"github.com/tuannm99/novasql/internal/heap"
 	"github.com/tuannm99/novasql/internal/record"
 	"github.com/tuannm99/novasql/internal/storage"
+	"github.com/tuannm99/novasql/internal/wal"
 )
 
 var (
@@ -61,7 +62,8 @@ type Database struct {
 	// Example: "/data/testdb"
 	DataDir string
 
-	SM *storage.StorageManager
+	WAL *wal.Manager
+	SM  *storage.StorageManager
 
 	// Global shared buffer pool (like PostgreSQL shared_buffers).
 	bp *bufferpool.GlobalPool
@@ -85,13 +87,20 @@ func NewDatabase(workDir string) *Database {
 		WorkDir: root,
 		DataDir: cur,
 		SM:      sm,
-		bp:      bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity),
 		views:   make(map[string]bufferpool.Manager),
 	}
-
-	// Ensure default db exists
 	_ = os.MkdirAll(filepath.Join(cur, "tables"), 0o755)
 
+	// WAL per database directory
+	w, _ := wal.Open(filepath.Join(cur, "wal"))
+	db.WAL = w
+	if db.WAL != nil {
+		if err := db.WAL.Recover(storage.NewWALWriter(db.SM)); err != nil {
+			slog.Warn("wal recover failed", "err", err)
+		}
+	}
+
+	db.bp = bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity, db.WAL)
 	return db
 }
 
@@ -158,7 +167,7 @@ func (db *Database) dbDir(name string) string {
 
 func (db *Database) resetBufferPool() {
 	// Recreate shared buffer pool and drop all cached views.
-	db.bp = bufferpool.NewGlobalPool(db.SM, bufferpool.DefaultCapacity)
+	db.bp = bufferpool.NewGlobalPool(db.SM, bufferpool.DefaultCapacity, db.WAL)
 
 	db.muViews.Lock()
 	db.views = make(map[string]bufferpool.Manager)
@@ -259,6 +268,14 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
+
+	// fsync dir to persist rename
+	d, err := os.Open(dir)
+	if err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+
 	ok = true
 	return nil
 }
@@ -327,6 +344,13 @@ func (db *Database) DropDatabase(name string) ([]string, error) {
 		}
 	}
 
+	if target == cur {
+		if db.WAL != nil {
+			_ = db.WAL.Close()
+			db.WAL = nil
+		}
+	}
+
 	// Remove the database directory.
 	if err := os.RemoveAll(target); err != nil {
 		return nil, err
@@ -337,9 +361,16 @@ func (db *Database) DropDatabase(name string) ([]string, error) {
 	if target == cur {
 		db.DataDir = db.dbDir("default")
 		_ = os.MkdirAll(filepath.Join(db.DataDir, "tables"), 0o755)
+
+		w, _ := wal.Open(filepath.Join(db.DataDir, "wal"))
+		db.WAL = w
+		if db.WAL != nil {
+			if err := db.WAL.Recover(storage.NewWALWriter(db.SM)); err != nil {
+				slog.Warn("wal recover failed", "err", err)
+			}
+		}
 		db.resetBufferPool()
 	}
-
 	return db.ListDatabase()
 }
 
@@ -395,6 +426,22 @@ func (db *Database) SelectDatabase(name string) ([]string, error) {
 
 	// Switch DataDir + reset caches/pool.
 	db.DataDir = target
+
+	// Close old WAL (best-effort)
+	if db.WAL != nil {
+		_ = db.WAL.Close()
+		db.WAL = nil
+	}
+
+	// Open WAL for new DB and recover
+	w, _ := wal.Open(filepath.Join(db.DataDir, "wal"))
+	db.WAL = w
+	if db.WAL != nil {
+		if err := db.WAL.Recover(storage.NewWALWriter(db.SM)); err != nil {
+			slog.Warn("wal recover failed", "err", err)
+		}
+	}
+
 	db.resetBufferPool()
 
 	// Return list of tables in the selected DB.
@@ -438,7 +485,7 @@ func (db *Database) CreateTable(name string, schema record.Schema) (*heap.Table,
 	}
 
 	overflowFS := db.overflowFileSet(name)
-	ovf := storage.NewOverflowManager(overflowFS)
+	ovf := storage.NewOverflowManagerWithWAL(overflowFS, db.WAL)
 
 	tbl := heap.NewTable(name, schema, db.SM, fs, bp, ovf, 0)
 	tbl.SetPageCountHook(func(pc uint32) error {
@@ -479,7 +526,7 @@ func (db *Database) OpenTable(name string) (*heap.Table, error) {
 	}
 
 	overflowFS := db.overflowFileSet(name)
-	ovf := storage.NewOverflowManager(overflowFS)
+	ovf := storage.NewOverflowManagerWithWAL(overflowFS, db.WAL)
 
 	tbl := heap.NewTable(name, meta.Schema, db.SM, fs, bp, ovf, pageCount)
 	tbl.SetPageCountHook(func(pc uint32) error {
@@ -767,6 +814,12 @@ func (db *Database) Close() error {
 	db.muViews.Unlock()
 
 	db.closed = true
+
+	if db.WAL != nil {
+		_ = db.WAL.Close()
+		db.WAL = nil
+	}
+
 	return nil
 }
 

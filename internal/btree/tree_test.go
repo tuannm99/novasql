@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -12,6 +13,7 @@ import (
 	"github.com/tuannm99/novasql/internal/heap"
 	"github.com/tuannm99/novasql/internal/record"
 	"github.com/tuannm99/novasql/internal/storage"
+	"github.com/tuannm99/novasql/internal/wal"
 )
 
 func newTestHeapTable(t *testing.T) (*heap.Table, *storage.StorageManager, *bufferpool.GlobalPool) {
@@ -21,7 +23,8 @@ func newTestHeapTable(t *testing.T) (*heap.Table, *storage.StorageManager, *buff
 	sm := storage.NewStorageManager()
 
 	// Shared/global buffer pool (Postgres-like).
-	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	w, _ := wal.Open(filepath.Join(dir, "wal"))
+	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity, w)
 
 	// Heap relation (users)
 	fs := storage.LocalFileSet{
@@ -358,7 +361,8 @@ func TestLeaf_AppendOutOfOrderIsAllowed(t *testing.T) {
 		Base: "idx",
 	}
 
-	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	w, _ := wal.Open(filepath.Join(dir, "wal"))
+	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity, w)
 	bp := gp.View(fs)
 
 	p, err := bp.GetPage(0)

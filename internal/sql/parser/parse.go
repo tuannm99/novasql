@@ -62,6 +62,7 @@ func Parse(sql string) (Statement, error) {
 	up := strings.ToUpper(s)
 
 	switch {
+	// database
 	case strings.HasPrefix(up, "CREATE DATABASE"):
 		return parseCreateDatabase(s)
 	case strings.HasPrefix(up, "DROP DATABASE"):
@@ -69,6 +70,7 @@ func Parse(sql string) (Statement, error) {
 	case strings.HasPrefix(up, "USE "):
 		return parseUseDatabase(s)
 
+	// table
 	case strings.HasPrefix(up, "CREATE TABLE"):
 		return parseCreateTable(s)
 	case strings.HasPrefix(up, "DROP TABLE"):

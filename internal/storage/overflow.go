@@ -6,7 +6,29 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/tuannm99/novasql/internal/wal"
 	"github.com/tuannm99/novasql/pkg/bx"
+)
+
+const (
+	overflowHeaderSize  = 6
+	overflowPayloadSize = PageSize - overflowHeaderSize - 8 // reserve trailer LSN
+
+	// meta page offsets
+	ovfMetaFreeHeadOff  = 0
+	ovfMetaNextAllocOff = 4
+
+	// pageID 0 reserved for meta
+	ovfFirstDataPageID = 1
+)
+
+var (
+	ErrOverflowEmptyData   = errors.New("overflow: empty data")
+	ErrOverflowZeroRef     = errors.New("overflow: zero-length ref")
+	ErrOverflowBadRef      = errors.New("overflow: bad ref")
+	ErrOverflowCorruption  = errors.New("overflow: corruption detected")
+	ErrOverflowTruncated   = errors.New("overflow: truncated chain")
+	ErrOverflowBadMetaPage = errors.New("overflow: bad meta page")
 )
 
 // OverflowRef points to an overflow chain in a dedicated overflow segment.
@@ -37,35 +59,38 @@ type OverflowRef struct {
 //   - we reuse [0..3] as nextFree pointer for free-list
 //   - used=0
 type OverflowManager struct {
-	fs FileSet
+	fs  FileSet
+	wal *wal.Manager
 }
 
 func NewOverflowManager(fs FileSet) *OverflowManager {
-	return &OverflowManager{
-		fs: fs,
-	}
+	return &OverflowManager{fs: fs}
 }
 
-const (
-	overflowHeaderSize  = 6
-	overflowPayloadSize = PageSize - overflowHeaderSize
+func NewOverflowManagerWithWAL(fs FileSet, w *wal.Manager) *OverflowManager {
+	return &OverflowManager{fs: fs, wal: w}
+}
 
-	// meta page offsets
-	ovfMetaFreeHeadOff  = 0
-	ovfMetaNextAllocOff = 4
+func (ovf *OverflowManager) SetWAL(w *wal.Manager) {
+	ovf.wal = w
+}
 
-	// pageID 0 reserved for meta
-	ovfFirstDataPageID = 1
-)
+func (ovf *OverflowManager) walBeforeWrite(pageID uint32, fullPage []byte) error {
+	if ovf == nil || ovf.wal == nil {
+		return nil
+	}
+	lfs, ok := ovf.fs.(LocalFileSet)
+	if !ok {
+		return nil
+	}
 
-var (
-	ErrOverflowEmptyData   = errors.New("overflow: empty data")
-	ErrOverflowZeroRef     = errors.New("overflow: zero-length ref")
-	ErrOverflowBadRef      = errors.New("overflow: bad ref")
-	ErrOverflowCorruption  = errors.New("overflow: corruption detected")
-	ErrOverflowTruncated   = errors.New("overflow: truncated chain")
-	ErrOverflowBadMetaPage = errors.New("overflow: bad meta page")
-)
+	// WAL is independent from storage now: pass (dir, base) instead of FileSet.
+	lsn, err := ovf.wal.AppendPageImage(lfs.Dir, lfs.Base, pageID, fullPage)
+	if err != nil {
+		return err
+	}
+	return ovf.wal.Flush(lsn)
+}
 
 func (ovf *OverflowManager) Write(data []byte) (OverflowRef, error) {
 	if len(data) == 0 {
@@ -111,22 +136,39 @@ func (ovf *OverflowManager) Write(data []byte) (OverflowRef, error) {
 		copy(buf[overflowHeaderSize:], data[offset:offset+chunk])
 
 		pageOff := int64(pageID) * int64(PageSize)
+
+		if err := ovf.walBeforeWrite(pageID, buf); err != nil {
+			return OverflowRef{}, err
+		}
+
 		if _, err := f.WriteAt(buf, pageOff); err != nil {
 			return OverflowRef{}, err
 		}
 
 		// Link previous page -> current page
 		if hasPrev {
+			// IMPORTANT: this mutates an existing page (prevPageID), so it must be WAL-logged too,
+			// otherwise crash+recovery can lose the link and truncate the chain.
 			prevOff := int64(prevPageID) * int64(PageSize)
-			var hdr [4]byte
-			bx.PutU32(hdr[:], pageID)
-			if _, err := f.WriteAt(hdr[:], prevOff); err != nil {
+
+			prevBuf := make([]byte, PageSize)
+			if _, err := f.ReadAt(prevBuf, prevOff); err != nil {
+				return OverflowRef{}, err
+			}
+
+			// Patch nextPageID at [0..3]
+			bx.PutU32(prevBuf[0:4], pageID)
+
+			if err := ovf.walBeforeWrite(prevPageID, prevBuf); err != nil {
+				return OverflowRef{}, err
+			}
+
+			if _, err := f.WriteAt(prevBuf, prevOff); err != nil {
 				return OverflowRef{}, err
 			}
 		} else {
 			hasPrev = true
 		}
-
 		prevPageID = pageID
 		offset += chunk
 		remaining -= chunk
@@ -267,14 +309,21 @@ func (ovf *OverflowManager) Free(ref OverflowRef) error {
 		// push this page onto free list:
 		// [0..3] nextFree = freeHead
 		// [4..5] used = 0
-		var hdr [6]byte
-		bx.PutU32(hdr[0:4], freeHead)
-		bx.PutU16(hdr[4:6], 0)
-		if _, err := f.WriteAt(hdr[:], pageOff); err != nil {
+		full := make([]byte, PageSize)
+		if _, err := f.ReadAt(full, pageOff); err != nil {
 			return err
 		}
-		freeHead = pageID
+		bx.PutU32(full[0:4], freeHead)
+		bx.PutU16(full[4:6], 0)
 
+		if err := ovf.walBeforeWrite(pageID, full); err != nil {
+			return err
+		}
+		if _, err := f.WriteAt(full, pageOff); err != nil {
+			return err
+		}
+
+		freeHead = pageID
 		remaining -= used
 
 		if remaining > 0 {
@@ -306,6 +355,9 @@ func (ovf *OverflowManager) ensureMeta(f *os.File) (freeHead uint32, nextAlloc u
 		bx.PutU32At(buf, ovfMetaFreeHeadOff, 0)
 		bx.PutU32At(buf, ovfMetaNextAllocOff, ovfFirstDataPageID)
 
+		if err := ovf.walBeforeWrite(0, buf); err != nil {
+			return 0, 0, err
+		}
 		if _, err := f.WriteAt(buf, 0); err != nil {
 			return 0, 0, err
 		}
@@ -327,12 +379,17 @@ func (ovf *OverflowManager) ensureMeta(f *os.File) (freeHead uint32, nextAlloc u
 
 func (ovf *OverflowManager) writeMeta(f *os.File, freeHead, nextAlloc uint32) error {
 	buf := make([]byte, PageSize)
-	// read current meta first (preserve future fields)
 	if _, err := f.ReadAt(buf, 0); err != nil {
 		return err
 	}
 	bx.PutU32At(buf, ovfMetaFreeHeadOff, freeHead)
 	bx.PutU32At(buf, ovfMetaNextAllocOff, nextAlloc)
+
+	// meta is pageID=0
+	if err := ovf.walBeforeWrite(0, buf); err != nil {
+		return err
+	}
+
 	_, err := f.WriteAt(buf, 0)
 	return err
 }

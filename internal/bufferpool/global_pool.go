@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/tuannm99/novasql/internal/storage"
+	"github.com/tuannm99/novasql/internal/wal"
 )
 
 var (
@@ -46,6 +47,7 @@ type GlobalPool struct {
 	frames []*Frame        // len == capacity, nil == free slot
 	table  map[PageTag]int // (fsKey,pageID) -> frame index
 	repl   Replacer        // replacement policy tracks frame indices [0..cap)
+	wal    *wal.Manager
 }
 
 // Frame is stored in global frames[].
@@ -56,14 +58,16 @@ type Frame struct {
 	Page  *storage.Page
 	Dirty bool
 	Pin   int32
+	LSN   uint64 // last wal lsn for this frame (0 if none)
 }
 
-func NewGlobalPool(sm *storage.StorageManager, capacity int) *GlobalPool {
+func NewGlobalPool(sm *storage.StorageManager, capacity int, w *wal.Manager) *GlobalPool {
 	if capacity <= 0 {
 		capacity = DefaultCapacity
 	}
 	return &GlobalPool{
 		sm:     sm,
+		wal:    w,
 		frames: make([]*Frame, capacity),
 		table:  make(map[PageTag]int),
 		repl:   newClockAdapter(capacity),
@@ -119,6 +123,7 @@ func (g *GlobalPool) GetPage(fs storage.FileSet, pageID uint32) (*storage.Page, 
 			Page:  page,
 			Dirty: false,
 			Pin:   1,
+			LSN:   0,
 		}
 		g.table[tag] = freeIdx
 
@@ -134,19 +139,25 @@ func (g *GlobalPool) GetPage(fs storage.FileSet, pageID uint32) (*storage.Page, 
 	}
 	victim := g.frames[victimIdx]
 	if victim == nil || victim.Pin != 0 {
-		// Defensive: replacer should never return nil/pinned victims.
 		return nil, ErrNoFreeFrame
 	}
 
 	// Flush victim if dirty
 	if victim.Dirty {
+		if g.wal != nil && victim.LSN != 0 {
+			if err := g.wal.Flush(victim.LSN); err != nil {
+				g.repl.RecordAccess(victimIdx)
+				g.repl.SetEvictable(victimIdx, true)
+				return nil, err
+			}
+		}
 		if err := g.sm.SavePage(victim.FS, victim.Tag.PageID, *victim.Page); err != nil {
-			// Put victim back as evictable if flush fails
 			g.repl.RecordAccess(victimIdx)
 			g.repl.SetEvictable(victimIdx, true)
 			return nil, err
 		}
 		victim.Dirty = false
+		victim.LSN = 0
 	}
 
 	// Load requested page
@@ -200,8 +211,17 @@ func (g *GlobalPool) Unpin(fs storage.FileSet, page *storage.Page, dirty bool) e
 	}
 
 	if dirty {
+		// Append WAL page image BEFORE marking dirty (WAL rule).
+		if g.wal != nil && f.Page != nil {
+			lsn, err := g.wal.AppendPageImage(f.FS.Dir, f.FS.Base, f.Tag.PageID, f.Page.Buf)
+			if err != nil {
+				return err
+			}
+			f.LSN = lsn
+		}
 		f.Dirty = true
 	}
+
 	if f.Pin > 0 {
 		f.Pin--
 		if f.Pin == 0 {
@@ -220,10 +240,16 @@ func (g *GlobalPool) FlushAll() error {
 		if f == nil || !f.Dirty {
 			continue
 		}
+		if g.wal != nil && f.LSN != 0 {
+			if err := g.wal.Flush(f.LSN); err != nil {
+				return err
+			}
+		}
 		if err := g.sm.SavePage(f.FS, f.Tag.PageID, *f.Page); err != nil {
 			return err
 		}
 		f.Dirty = false
+		f.LSN = 0
 	}
 	return nil
 }
@@ -245,10 +271,16 @@ func (g *GlobalPool) FlushFileSet(fs storage.FileSet) error {
 		if f.Tag.FSKey != key {
 			continue
 		}
+		if g.wal != nil && f.LSN != 0 {
+			if err := g.wal.Flush(f.LSN); err != nil {
+				return err
+			}
+		}
 		if err := g.sm.SavePage(f.FS, f.Tag.PageID, *f.Page); err != nil {
 			return err
 		}
 		f.Dirty = false
+		f.LSN = 0
 	}
 	return nil
 }
@@ -286,6 +318,11 @@ func (g *GlobalPool) DropFileSet(fs storage.FileSet) error {
 		}
 
 		if f.Dirty {
+			if g.wal != nil && f.LSN != 0 {
+				if err := g.wal.Flush(f.LSN); err != nil {
+					return err
+				}
+			}
 			if err := g.sm.SavePage(f.FS, f.Tag.PageID, *f.Page); err != nil {
 				return err
 			}

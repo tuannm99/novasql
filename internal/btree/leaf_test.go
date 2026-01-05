@@ -1,6 +1,7 @@
 package btree
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -8,6 +9,7 @@ import (
 	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/heap"
 	"github.com/tuannm99/novasql/internal/storage"
+	"github.com/tuannm99/novasql/internal/wal"
 )
 
 // newTestLeaf creates a LeafNode backed by a fresh page (pageID=0) in a temp dir.
@@ -23,7 +25,8 @@ func newTestLeaf(t *testing.T) (*LeafNode, *storage.StorageManager, storage.Loca
 	}
 
 	// Shared buffer
-	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	w, _ := wal.Open(filepath.Join(fs.Dir, "wal"))
+	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity, w)
 
 	// Relation-scoped view (implements bufferpool.Manager)
 	bp := gp.View(fs)

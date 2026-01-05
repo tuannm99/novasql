@@ -2,6 +2,7 @@ package heap
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -9,6 +10,7 @@ import (
 	"github.com/tuannm99/novasql/internal/bufferpool"
 	"github.com/tuannm99/novasql/internal/record"
 	"github.com/tuannm99/novasql/internal/storage"
+	"github.com/tuannm99/novasql/internal/wal"
 )
 
 // newTestTable creates a new heap.Table bound to a temp directory and returns it
@@ -23,7 +25,8 @@ func newTestTable(t *testing.T, base string) (*Table, *storage.StorageManager, s
 	sm := storage.NewStorageManager()
 
 	// Shared buffers (Postgres-like)
-	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	w, _ := wal.Open(filepath.Join(dir, "wal"))
+	gp := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity, w)
 
 	fs := storage.LocalFileSet{
 		Dir:  dir,
@@ -84,7 +87,8 @@ func TestTable_InsertAndScan_Persisted(t *testing.T) {
 	require.Greater(t, pageCount, uint32(0))
 
 	// NEW: reopen using a new GlobalPool (like a new process)
-	gp2 := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	w, _ := wal.Open(filepath.Join(fs.Dir, "wal"))
+	gp2 := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity, w)
 	bp2 := gp2.View(fs)
 
 	schema := tbl.Schema // reuse schema
@@ -159,7 +163,8 @@ func TestTable_UpdateRedirect_ScanAndGet(t *testing.T) {
 	pageCount, err := sm.CountPages(fs)
 	require.NoError(t, err)
 
-	gp2 := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	w, _ := wal.Open(filepath.Join(fs.Dir, "wal"))
+	gp2 := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity, w)
 	bp2 := gp2.View(fs)
 
 	schema := tbl.Schema
@@ -223,7 +228,8 @@ func TestTable_DeleteAndScan(t *testing.T) {
 	pageCount, err := sm.CountPages(fs)
 	require.NoError(t, err)
 
-	gp2 := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity)
+	w, _ := wal.Open(filepath.Join(fs.Dir, "wal"))
+	gp2 := bufferpool.NewGlobalPool(sm, bufferpool.DefaultCapacity, w)
 	bp2 := gp2.View(fs)
 
 	schema := tbl.Schema

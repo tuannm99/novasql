@@ -116,13 +116,15 @@ cmd/
   client/      CLI client entrypoint
 internal/
   storage/     pages, segments, storage manager, overflow
-  bufferpool/  global pool + CLOCK
+  bufferpool/  global pool + CLOCK (WAL-aware flushing)
+  wal/         WAL (redo-only page images, CRC, recovery)
   heap/        heap table
   btree/       B+Tree index
   sql/
     parser/
     planner/
     executor/
+pkg/           helpers
 server/
   novasqlsqlwire/     frame protocol definitions + encode/decode
 sqlclient/     reusable TCP client package
